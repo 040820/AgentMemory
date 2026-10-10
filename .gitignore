@@ -1,0 +1,32 @@
+# 密钥与本地配置（切勿入库）
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+
+# IDE / 系统
+.idea/
+.vscode/
+.DS_Store
+
+# ===== 运行时数据产物（可用 prepare_datasets.py / run.py 再生） =====
+# 图数据库与索引
+tempkg_*.db
+entity_index_*/
+hybrid_cache/
+embedding_cache_*/
+questions_with_candidates_*.json
+
+# 经验库 / 配置缓存 / 实验库
+unified_knowledge*/
+.config_name.json
+experiments/
+
+# 模板学习等运行时生成物
+/memotime/data/
+/memotime/templates/
+/memotime/templates_index.json
+
+# 打包临时文件
+*.tar.gz

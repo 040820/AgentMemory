@@ -1,0 +1,8 @@
+python: 3.11.16
+torch: 2.3.0+cu121 (cuda 12.1, available=True)
+openai: 1.50.2
+numpy: 1.26.4
+transformers: 4.51.3
+python-dotenv: 1.2.3
+faiss: 1.10.0
+FlagEmbedding: unknown

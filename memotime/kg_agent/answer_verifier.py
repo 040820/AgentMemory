@@ -11,6 +11,8 @@ from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
 
 
+# 将模型答案与数据集标准答案对齐比较：先归一化实体/时间文本，再按答案类型和粒度判断是否匹配。
+# 这是基准评测验证，不是 stepwise.py 中判断证据是否足以回答子问题的 sufficiency check。
 class AnswerVerifier:
     """Answer Verifier"""
     

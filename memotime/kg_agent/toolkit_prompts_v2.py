@@ -51,13 +51,17 @@ def get_initial_examples_fallback(template_key: str, max_examples: int = 3) -> s
 def get_prompt_for_question_type(qtype: str, subquestion: str, seed_info: str, 
                                 context_info: str, time_hints: dict, 
                                 entity_names: list) -> str:
-    """Return specialized prompt for different question types"""
+    """为指定时间题型组装工具选择提示，输入子问题、种子、上下文和时间线索。
+
+    先找统一知识库的成功工具选择样例；历史样例不足时补充冷启动样例，
+    最后把样例和当前问题交给选择器的 LLM，而不是在这里直接执行 KG 查询。
+    """
     ############################## STEP 1: LOAD EXAMPLES FROM TEMPLATE LEARNING ##############################
     enhanced_prompt = ""
     examples = []
 
     try:
-        # First try to get examples from enhanced unified knowledge store
+        # 只取 toolkit_selection 类别的相似历史记录，避免混入分解或答案经验。
 
         from .enhanced_unified_integration import get_toolkit_selection_enhanced
 
@@ -88,7 +92,7 @@ def get_prompt_for_question_type(qtype: str, subquestion: str, seed_info: str,
     except Exception as e:
         print(f"⚠️ Toolkit selection template learning enhanced failed: {e}")
 
-    # Question type mapping
+    # 保留不同题型到提示样例类别的名称映射；当前实际模板键由 qtype 给出。
     template_name = {
         "WHEN": "equal",
         "AFTER": "after_first", 
@@ -151,6 +155,8 @@ def get_prompt_for_question_type(qtype: str, subquestion: str, seed_info: str,
     #         examples_text = "\n".join(examples_parts)
     # Third layer: use initial examples library (cold start solution)
     # if not examples_text:
+    # 当前分支在无经验或不足 10 条时加载冷启动样例；即使有少量历史样例也会执行。
+    # 若历史样例达到 10 条，下面未给 examples_text 赋值，后续格式化可能失败。
     if len(enhanced_prompt) == 0 or len(examples) < 10:
         # print(f"📚 No historical examples found, using initial examples for question type: {qtype}")
         examples_text = get_initial_examples_fallback(template_key, max_examples=10)

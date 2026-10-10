@@ -1,0 +1,11 @@
+# Xiaomi MiMo (OpenAI 兼容接口)
+MIMO_API_KEY=sk-c5ik6n6o***
+MIMO_BASE_URL=https://api.xiaomimimo.com/v1
+MIMO_MODEL=mimo-v2.6-flash
+
+# ===== 实验骨干模型（改 LLM_MODEL 切换） =====
+# vLLM 自部署 Qwen3-8B（论文骨干之一，复现实验用）
+LLM_MODEL=qwen3-8b
+QWEN_BASE_URL=http://10.11.154.236:8011/v1
+
+# 小米 MiMo（备用，LLM_MODEL=mimo 切回）

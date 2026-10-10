@@ -98,7 +98,8 @@ def record_question_decomposition_enhancement(
         return
     
     try:
-        # build enhancement data
+        # 最终答案通过充分性检查后，保留整题分解结构作为同题型示例。
+        # 这些字段随后进入下一个问题的分解提示，并不是现题的标准答案。
         enhancement_data = {
             "type": "question_decomposition",
             "question": question,
@@ -114,7 +115,7 @@ def record_question_decomposition_enhancement(
         # save to unified knowledge store
         store = get_unified_knowledge_store(experiment_setting=experiment_setting)
         
-        # create query text (for similarity matching)
+        # 检索键同时写入问题与题型，降低不同时间算子混用样例的机会。
         query_text = f"Question: {question}\nType: {question_type}"
         
         store.store_knowledge(
@@ -158,7 +159,7 @@ def record_seed_selection_enhancement(
         return
     
     try:
-        # build enhancement data
+        # 保存候选实体列表和实际选出的种子；output 使用候选列表中的 1 起始序号。
         enhancement_data = {
             "type": "seed_selection",
             "subquestion": subquestion,
@@ -229,7 +230,7 @@ def record_toolkit_selection_enhancement(
         return
     
     try:
-        # build enhancement data
+        # 工具经验同时记录选择的工具名、实际函数、参数、时间提示和选择理由。
         enhancement_data = {
             "type": "toolkit_selection",
             "subquestion": subquestion,
@@ -316,7 +317,8 @@ def get_question_decomposition_enhanced(
     # try:
     store = get_unified_knowledge_store(experiment_setting=experiment_setting)
 
-    # query similar question decomposition examples
+    # 只检索 question_decomposition 类别；结果稍后转成 Q/Subquestions 等提示字段。
+    # 若启用共享模式，可遍历各实验数据库；相似度阈值和 topk 由调用方给定。
     # in shared mode, search all individual databases
     try:
         from memotime.kg_agent.storage_manager import StorageMode
@@ -410,7 +412,7 @@ def get_seed_selection_enhanced(
     try:
         store = get_unified_knowledge_store(experiment_setting=experiment_setting)
         
-        # query similar seed selection examples
+        # 相似子问题的选种子结果用于提示 LLM，不直接替当前题决定种子实体。
         # in shared mode, search all individual databases
         try:
             from memotime.kg_agent.storage_manager import StorageMode
@@ -514,7 +516,7 @@ def get_toolkit_selection_enhanced(
     try:
         store = get_unified_knowledge_store(experiment_setting=experiment_setting)
         
-        # query similar toolkit selection examples
+        # 查询同类工具选择轨迹；调用方会把返回示例加入当前工具选择提示。
         # in shared mode, search all individual databases
         try:
             from memotime.kg_agent.storage_manager import StorageMode
@@ -635,7 +637,7 @@ def record_experience_pool_enhancement(
         return
     
     try:
-        # extract entities and time constraint
+        # 从子问题指标/已验证证据提取实体与时间，构成可复用的子问题经验键。
         entities = []
         time_constraint = None
         
@@ -685,7 +687,7 @@ def record_experience_pool_enhancement(
         # build toolkit parameters
         toolkit_params = toolkit_info.copy() if toolkit_info else {}
         
-        # build execution data
+        # 保留候选证据及检索路径，供之后的相似问题查看或复核。
         execution_data = {
             "top_candidates": [evidence] if evidence else [],
             "total_candidates": 1,
@@ -700,7 +702,7 @@ def record_experience_pool_enhancement(
         # get sufficiency_args from context
         sufficiency_args = context.get('sufficiency_args', {})
         
-        # write to unified knowledge store
+        # 统一写入 query_type=subquestion 的记录；是否直接复用仍由调用方决定。
         store = get_unified_knowledge_store(experiment_setting=experiment_setting)
         store.store_knowledge(
             query_text=subquestion,
@@ -756,7 +758,7 @@ def get_experience_pool_enhanced(
     try:
         store = get_unified_knowledge_store(experiment_setting=experiment_setting)
         
-        # query similar experience pool examples
+        # 查出相似的子问题经验；当前 stepwise 主循环没有调用这条直取路径。
         candidates = store.lookup_knowledge(
             query_text=given_subquestion,
             query_type="subquestion",

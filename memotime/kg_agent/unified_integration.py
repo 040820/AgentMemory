@@ -13,6 +13,8 @@ from .unified_knowledge_store import (
 )
 from .storage_manager import get_storage_manager, ExperimentSetting, StorageMode
 
+# 经验复用入口：检索相似子问题的历史记录，并重新检查充分性；只有验证通过才返回缓存证据，否则返回 None 走新检索。
+# 经验复用入口：检索相似子问题的历史记录，并重新检查充分性；只有验证通过才返回缓存证据，否则返回 None 走新检索。
 def try_unified_knowledge_shortcut(subq_obj: Any, ctx: Dict[str, Any], 
                                   sufficiency_checker, 
                                   enable_knowledge: bool = True,
@@ -195,6 +197,10 @@ def try_unified_knowledge_shortcut(subq_obj: Any, ctx: Dict[str, Any],
         print(f"⚠️ Unified knowledge store query failed: {e}")
         return None
 
+# 把验证成功的子问题、指标、证据、工具参数和候选摘要整理后写入统一知识库，供后续复用。
+# 注意主流程当前是否实际调用这两个接口，要以 stepwise.py 中的调用点为准。
+# 把验证成功的子问题、指标、证据、工具参数和候选摘要整理后写入统一知识库，供后续复用。
+# 注意主流程当前是否实际调用这两个接口，要以 stepwise.py 中的调用点为准。
 def record_successful_knowledge(subq_obj: Any, ctx: Dict[str, Any], 
                                step_result: Dict[str, Any],
                                toolkit_params: Dict[str, Any],

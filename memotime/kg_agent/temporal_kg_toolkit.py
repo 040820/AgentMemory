@@ -28,6 +28,8 @@ def _to_epoch(dt: datetime) -> int:
 def _month_end(year: int, month: int) -> int:
     return calendar.monthrange(year, month)[1]
 
+# 把 YYYY、YYYY-MM、完整日期和相对时间等输入归一化为可比较的时间表达；缺少粒度时结合上下文补全。
+# 把 YYYY、YYYY-MM、完整日期和相对时间等输入归一化为可比较的时间表达；缺少粒度时结合上下文补全。
 def smart_parse_time(time_input: Union[str, int, None], context_year: Optional[int] = None, context_info: Optional[Dict[str, Any]] = None) -> Optional[str]:
     """ 
     Smartly parse various time formats, return ISO format string
@@ -142,6 +144,8 @@ def smart_parse_time(time_input: Union[str, int, None], context_year: Optional[i
     return None
 
 
+# 将时间点扩展成起止范围和比较用数值，支持按日/月/年粒度执行包含、先后和区间查询。
+# 将时间点扩展成起止范围和比较用数值，支持按日/月/年粒度执行包含、先后和区间查询。
 def parse_time_to_range(s: Union[str, int], context_year: Optional[int] = None, context_info: Optional[Dict[str, Any]] = None) -> Tuple[str, str, str, int, int]:
 
     # first use smart parsing
@@ -275,6 +279,8 @@ class QueryResult:
 # ======================
 # Core query tool
 # ======================
+# 基础 SQLite 查询接口：执行一跳关系、同日/同月/同年事件、实体直连等结构化查询。
+# 基础 SQLite 查询接口：执行一跳关系、同日/同月/同年事件、实体直连等结构化查询。
 class TemporalKGQuery:
     """Time knowledge graph query tool"""
     
@@ -730,6 +736,8 @@ class TemporalKGQuery:
 # ======================
 # Advanced temporal operation tool
 # ======================
+# 复合时间查询：实现 after-first、before-last、区间事件、时间邻居和多实体顺序等高阶操作。
+# 复合时间查询：实现 after-first、before-last、区间事件、时间邻居和多实体顺序等高阶操作。
 class AdvancedTemporalQuery:
     """Advanced temporal query tool, support complex temporal relationship operations"""
     
@@ -811,14 +819,21 @@ class AdvancedTemporalQuery:
 
     def find_before_last(self, entity: Union[str, int], reference_time: str, 
                         limit: Optional[int] = None) -> QueryResult:
-        """Find the last event before the reference time"""
+        """返回与实体相连、结束时间早于参考时间的边，按结束时间倒序排列。
+
+        entity 可为名称或 ID；reference_time 可解析成年/月/日的时间范围；
+        limit 未传时最多返回 50 条。只有调用方设 limit=1 才只取最近一条，
+        本函数自身不校验关系语义，仍需上层按问题筛选证据。
+        """
         conn = _connect(self.db_path)
         cur = conn.cursor()
         
+        # 字符串实体名先映射为数据库 ID；参考时刻取时间范围的右端点。
         eid = entity_id(self.db_path, entity)
         _, _, _, _, ref_epoch = parse_time_to_range(reference_time)
         
         limit_sql = f" LIMIT {int(limit)}" if limit else " LIMIT 50"
+        # 边以当前实体为头或尾均可命中；严格小于参考时刻，排除边界重合事件。
         sql = f"""
           SELECT h.name, e.relation, t.name, e.t_start, e.t_end, e.granularity,
                  e.head_id, e.tail_id, e.t_start_epoch, e.t_end_epoch, e.source
@@ -844,14 +859,19 @@ class AdvancedTemporalQuery:
 
     def find_after_first(self, entity: Union[str, int], reference_time: str, 
                         limit: Optional[int] = None) -> QueryResult:
-        """Find the first event after the reference time"""
+        """返回与实体相连、开始时间晚于参考时间的边，按开始时间正序排列。
+
+        参考时刻取可解析时间范围的左端点；默认最多返回 100 条候选边。
+        排序使最早的边排在前面，但关系与答案仍由后续流程判断。
+        """
         conn = _connect(self.db_path)
         cur = conn.cursor()
         
+        # 与 before_last 对称，先取得实体 ID，再解析参考时间的左端点。
         eid = entity_id(self.db_path, entity)
         _, _, _, ref_epoch, _ = parse_time_to_range(reference_time)
         
-        # optimize time filter: before use > instead of >=, increase return number
+        # SQL 使用严格大于：与参考时间同一时间戳的事件不会作为“之后”返回。
         limit_sql = f" LIMIT {int(limit)}" if limit else " LIMIT 100"
         sql = f"""
           SELECT h.name, e.relation, t.name, e.t_start, e.t_end, e.granularity,
@@ -878,7 +898,7 @@ class AdvancedTemporalQuery:
 
     def find_between_times(self, entity: Union[str, int], start_time: str, end_time: str,
                           limit: Optional[int] = None) -> QueryResult:
-        """Find events between two time points"""
+        """复用一跳查询，在 start_time 与 end_time 区间内查找双向事实边。"""
         return self.base_query.retrieve_one_hop(
             query=entity,
             direction="both",
@@ -889,7 +909,7 @@ class AdvancedTemporalQuery:
 
     def find_temporal_neighbors(self, entity: Union[str, int], time_operation: str,
                                reference_time: str, limit: Optional[int] = None) -> QueryResult:
-        """Find temporal neighbors (support multiple time operations)"""
+        """按时间算子分派查询；between 要求 reference_time 含逗号分隔的两端点。"""
         if time_operation == "before":
             return self.find_entities_before_time(reference_time, limit)
         elif time_operation == "after":
@@ -1014,6 +1034,8 @@ class AdvancedTemporalQuery:
 # ======================
 # Toolkit main class
 # ======================
+# 工具门面把基础查询和高级查询合并到一个对象上；__getattr__ 会把未在门面定义的方法转发给内部查询器。
+# 工具门面把基础查询和高级查询合并到一个对象上；__getattr__ 会把未在门面定义的方法转发给内部查询器。
 class TemporalKGToolkit:
     """Time knowledge graph toolkit main class"""
     

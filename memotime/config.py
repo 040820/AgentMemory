@@ -9,6 +9,19 @@ import os
 from typing import Dict, Any
 from pathlib import Path
 
+# 加载项目根目录 .env（LLM_MODEL 等配置），需在读取环境变量前执行
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+except Exception:
+    pass
+
+# 全局运行配置集中在此类：数据路径、LLM 模型、检索参数、经验库路径和评测范围。
+# 路径由当前数据集派生；apply_config 会在运行时覆盖类属性。
+# 全局运行配置集中在此类：数据路径、LLM 模型、检索参数、经验库路径和评测范围。
+# 路径由当前数据集派生；apply_config 会在运行时覆盖类属性。
+# 全局运行配置集中在此类：数据路径、LLM 模型、检索参数、经验库路径和评测范围。
+# 路径由当前数据集派生；apply_config 会在运行时覆盖类属性。
 class TPKGConfig:
     """TPKG system unified configuration"""
     
@@ -338,6 +351,9 @@ class TPKGConfig:
 
 # ========== predefined experiment configuration ==========
 
+# 预设工厂返回可复用的配置字典；它们不执行实验，只提供参数值。
+# 预设工厂返回可复用的配置字典；它们不执行实验，只提供参数值。
+# 预设工厂返回可复用的配置字典；它们不执行实验，只提供参数值。
 class ExperimentPresets:
     """Predefined experiment configuration"""
     
@@ -408,6 +424,12 @@ class ExperimentPresets:
 
     # ========== convenient functions ==========
 
+# 将 CLI 或预设生成的字典写入 TPKGConfig。调用顺序决定优先级：后应用的值覆盖先前值。
+# 函数还同步更新存储模式和实验设置，避免只改配置字段却让底层存储仍使用旧状态。
+# 将 CLI 或预设生成的字典写入 TPKGConfig。调用顺序决定优先级：后应用的值覆盖先前值。
+# 函数还同步更新存储模式和实验设置，避免只改配置字段却让底层存储仍使用旧状态。
+# 将 CLI 或预设生成的字典写入 TPKGConfig。调用顺序决定优先级：后应用的值覆盖先前值。
+# 函数还同步更新存储模式和实验设置，避免只改配置字段却让底层存储仍使用旧状态。
 def apply_config(config_dict: Dict[str, Any]):
     """
     Apply configuration dictionary to TPKGConfig class
@@ -476,6 +498,9 @@ def apply_config(config_dict: Dict[str, Any]):
     if 'use_unified_knowledge_store' in config_dict:
         TPKGConfig.USE_UNIFIED_KNOWLEDGE_STORE = config_dict['use_unified_knowledge_store']
 
+# 按名称取得预设并应用；找不到名称时由函数现有逻辑处理，不会在这里启动推理。
+# 按名称取得预设并应用；找不到名称时由函数现有逻辑处理，不会在这里启动推理。
+# 按名称取得预设并应用；找不到名称时由函数现有逻辑处理，不会在这里启动推理。
 def load_preset(preset_name: str):
     """
     Load predefined configuration

@@ -2,7 +2,7 @@
 """
 - build-index:
     1) read entity table entities(id INTEGER PRIMARY KEY, name TEXT) from SQLite.
-    2) embed entity names with OpenAI text-embedding-3-large, save to out_dir/entity_embs.npy.
+    2) embed entity names with local BGE-M3, save to out_dir/entity_embs.npy.
     3) write out_dir/entity_meta.json (contains entity id order, for pos<->id mapping).
     4) optional: build FAISS HNSW index and write to out_dir/entity_hnsw.index (recommended).
 - run:
@@ -15,39 +15,21 @@
     3) output a JSON file, containing candidates list (id, name, score) for each question.
 
 dependencies:
-  pip install openai faiss-cpu
-
-environment variables:
-  OPENAI_API_KEY=...
+  pip install faiss-cpu FlagEmbedding
 """
 
 import os, re, json, argparse, sqlite3
 from typing import List, Tuple, Dict, Any, Optional
 import numpy as np
 
+# ============== local embedding (BGE-M3, replaces OpenAI embeddings API) ==============
+from memotime.kg_agent.local_embed import embed_texts
+
 # ============== optional: FAISS ==============
 try:
     import faiss  # pip install faiss-cpu
 except Exception:
     faiss = None
-
-# ============== OpenAI client ==============
-try:
-    from openai import OpenAI
-    _openai_client = None
-    def _client():
-        global _openai_client
-        if _openai_client is None:
-            from memotime.kg_agent.llm import DEFAULT_OPENAI_API_KEY
-            api_key = os.getenv("OPENAI_API_KEY") or DEFAULT_OPENAI_API_KEY
-            _openai_client = OpenAI(api_key=api_key)
-        return _openai_client
-except Exception:
-    OpenAI = None
-    def _client():
-        raise RuntimeError("openai package not installed. pip install openai")
-
-EMBED_MODEL = "text-embedding-3-large"
 
 def canon_text(s: str) -> str:
     """
@@ -88,31 +70,24 @@ def load_entity_ids(index_dir: str):
     id2pos = {int(eid): i for i, eid in enumerate(ids)}
     return pos2id, id2pos
 
-# ============== OpenAI embedding ==============
-def openai_embed(texts: List[str]) -> np.ndarray:
-    """
-    return L2 normalized embedding matrix (N, D); will call API in batches of 256.
-    """
-    cli = _client()
-    out = []
-    for i in range(0, len(texts), 256):
-        batch = texts[i:i+256]
-        resp = cli.embeddings.create(model=EMBED_MODEL, input=batch)
-        out.extend([v.embedding for v in resp.data])
-    arr = np.array(out, dtype=np.float32)
-    arr /= (np.linalg.norm(arr, axis=1, keepdims=True) + 1e-12)
-    return arr
-
 # ============== build index (HNSW optional) ==============
 def cmd_build_index(db_path: str, out_dir: str, fp16: bool = False,
-                    build_hnsw: bool = True, M: int = 64, ef_construction: int = 400, ef_search: int = 128):
+                    build_hnsw: bool = True, M: int = 64, ef_construction: int = 400, ef_search: int = 128,
+                    entity_ids: Optional[set] = None):
+    """
+    entity_ids: 只为这些实体建索引（子集模式）；None 表示全量。
+    """
     os.makedirs(out_dir, exist_ok=True)
     ents = fetch_entities(db_path)
+    if entity_ids is not None:
+        keep = set(int(x) for x in entity_ids)
+        ents = [(i, n) for i, n in ents if i in keep]
+        print(f"[Subset] entity index scope: {len(ents)} entities (subset)")
     ids = [i for i, _ in ents]
     names = [n for _, n in ents]
     names_for_embed = [canon_text(n) for n in names]
     # 1) entity name embedding
-    E = openai_embed(names_for_embed)  # (N, 3072)
+    E = embed_texts(names_for_embed)  # (N, 1024)
     if fp16:
         E = E.astype("float16")
     np.save(os.path.join(out_dir, "entity_embs.npy"), E)
@@ -190,7 +165,7 @@ def semantic_candidates_by_keywords(
                 seen.add(v2); aug.append(v2)
 
     kw = aug
-    K = openai_embed(kw)
+    K = embed_texts(kw)
  # (K, D), already normalized
     K = K / (np.linalg.norm(K, axis=1, keepdims=True) + 1e-12)
 

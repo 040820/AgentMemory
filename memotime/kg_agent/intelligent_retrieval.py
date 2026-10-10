@@ -64,6 +64,8 @@ import torch
 from sentence_transformers import SentenceTransformer
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
+# 检索层协调关系/实体相似度、图结构查询、候选路径排序和可选混合检索；它返回供 stepwise 做充分性判定的证据。
+# 检索层协调关系/实体相似度、图结构查询、候选路径排序和可选混合检索；它返回供 stepwise 做充分性判定的证据。
 class IntelligentRetrieval:
     """Intelligent Retrieval System (Refactored and Integrated Version)"""
 
@@ -79,6 +81,10 @@ class IntelligentRetrieval:
     WEIGHT_ENTITY = 0.3
     WEIGHT_REL = 0.7
 
+# 初始化时绑定当前数据集的 SQLite 图数据库、时间查询器、句向量模型和可选关系向量缓存。
+# raw_data_path 也按数据集格式选择 full.txt 或 full_fixed.txt，供混合检索回查原始事实。
+# 初始化时绑定当前数据集的 SQLite 图数据库、时间查询器、句向量模型和可选关系向量缓存。
+# raw_data_path 也按数据集格式选择 full.txt 或 full_fixed.txt，供混合检索回查原始事实。
     def __init__(self, db_path: str, embedding_model: str = "all-MiniLM-L6-v2", use_embedding_cache: bool = True, use_hybrid_retrieval: bool = False, raw_data_path: str = None):
         self.db_path = db_path
         self.kg_query = TemporalKGQuery(db_path)
@@ -1797,6 +1803,11 @@ Note:
                                    time_constraint: str, 
                                    constraint_type: str = "after",
                                    subquestion_obj: Optional[Any] = None) -> List[Dict[str, Any]]:
+        """按参考时间筛选候选事实，并按题型要求排列时间顺序。
+
+        paths 是含 time_start_epoch 的事实字典；after/before 使用严格比较，
+        equal/between 使用解析出的闭区间。时间解析失败时保留原候选。
+        """
         if not paths:
             return []
         s, e, g, ref_epoch, _ = self._parse_ref_epoch(time_constraint, subquestion_obj)
@@ -1840,6 +1851,7 @@ Note:
                     print(f"⚠️ no valid time information, skip time filtering, return all {len(paths)} paths")
                     return paths
         
+        # 多实体检索汇集出的边必须经过此类时间筛选，才可用于比较事件先后。
         filtered = []
         for p in paths:
             t = p.get('time_start_epoch', 0)
@@ -1911,8 +1923,14 @@ Note:
         return self.kg_query.retrieve_one_hop(query=entity, direction="both", limit=None)
 
     def _retrieve_multi_seed_paths(self, entities: List[str], time_constraint: str = None):
+        """汇集多个种子之间的直接边及各自的一跳边，去重后把直接边排前面。
+
+        time_constraint 在本函数内尚未使用；时间过滤由其他检索步骤完成。
+        返回具有 edges 属性的兼容对象，供单种子/多种子路径统一消费。
+        """
         print(f"📊 multi-seed retrieval (seeds: {entities})")
         all_edges = []
+        # 两两查找直接连接，优先保留能同时联系多个题目实体的证据。
         if len(entities) >= 2:
             print("🔗 prioritize direct connection between seeds")
             for i in range(len(entities)):
@@ -1924,6 +1942,7 @@ Note:
                             all_edges.extend(direct.edges)
                     except Exception as e:
                         print(f"⚠️ direct connection retrieval failed {e1} <-> {e2}: {e}")
+        # 再扩大到每个种子的一跳邻居，以覆盖没有直接边的情况。
         for ent in entities:
             try:
                 res = self.kg_query.retrieve_one_hop(query=ent, direction="both", limit=None)
@@ -1931,6 +1950,7 @@ Note:
                     all_edges.extend(res.edges)
             except Exception as e:
                 print(f"⚠️ seed {ent} 1-hop retrieval failed: {e}")
+        # 现有实现重复查询一次种子对；后面的去重会消除重复边，但不会消除查询开销。
         if len(entities) >= 2:
             for i in range(len(entities)):
                 for j in range(i + 1, len(entities)):
@@ -1941,6 +1961,7 @@ Note:
                             all_edges.extend(direct_all.edges)
                     except Exception as e:
                         print(f"⚠️ direct connection retrieval failed {e1} <-> {e2}: {e}")
+        # 用头实体、关系、尾实体和时间构成去重键，避免多次检索的同一事实重复计数。
         unique = self._prune_duplicate_paths(all_edges)
         prioritized_edges = self._prioritize_direct_connections(unique, entities)
         class MultiSeedResult:  # compatible return
@@ -1982,17 +2003,16 @@ Note:
         return unique_edges
 
     def _find_all_direct_connections(self, entity_names: List[str], time_constraint: str = None, constraint_type: str = None, subquestion_obj: Optional[Any] = None) -> List[Dict[str, Any]]:
-        """
-        find direct connection edges between any two entities, with time constraint
+        """在 SQLite 中逐对查询种子实体的直接事实边，可附加时间条件。
         
         Args:
-            entity_names: entity name list
-            time_constraint: time constraint (e.g. "after" -> time parameter)
-            constraint_type: constraint_type ("after", "before", "between")
-            subquestion_obj: subquestion object, for extracting context information
+            entity_names: 至少两个待同步验证的实体名称。
+            time_constraint: 参考日期或区间文本。
+            constraint_type: after、before 或 between，决定 SQL 的时间谓词。
+            subquestion_obj: 可从其 indicator.constraints 提取上下文年份。
             
         Returns:
-            list of found direct connection edges
+            字典形式的事实边列表，带实体名、关系、时间戳和原始边 ID。
         """
         if len(entity_names) < 2:
             return []
@@ -2051,7 +2071,7 @@ Note:
                         e1_id = entity_id(db_path, entity1)
                         e2_id = entity_id(db_path, entity2)
                         
-                        # SQL query + time filtering
+                        # 同时查询 e1→e2 与 e2→e1 两种方向；时间列用于后续同步判断。
                         sql_base = """
                         SELECT e.id, e.head_id, e.relation, e.tail_id, e.t_start, e.t_end, 
                                e.t_start_epoch, e.t_end_epoch, e.granularity
@@ -2063,6 +2083,8 @@ Note:
                         time_filter = ""
                         params = [e1_id, e2_id, e2_id, e1_id]
                         
+                        # 当前 SQL 的 OR 条件未整体加括号；拼接 AND 后只约束第二个方向。
+                        # 这是现有实现的边界，不能把该分支理解为双向都完成时间过滤。
                         if time_constraint and q0 and q1:
                             if constraint_type == "between":
                                 time_filter = " AND NOT (e.t_end_epoch < ? OR e.t_start_epoch > ?)"
@@ -2201,6 +2223,8 @@ Note:
         return out
 
     # ================== LLM selection (keep) ==================
+# 将候选路径交给 LLM 做语义相关性选择；其结果仍需上层时间约束和充分性检查确认。
+# 将候选路径交给 LLM 做语义相关性选择；其结果仍需上层时间约束和充分性检查确认。
     def llm_path_selection(self, paths: List[Dict[str, Any]],
                            subquestion: str,
                            context: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -2361,6 +2385,8 @@ Return JSON like: {{"selected_paths": [1, 3, 5], "reason": "brief explanation"}}
         return list(range(min(top_k, len(batch_paths))))
 
     # ================== top-level pipeline (core) ==================
+# 核心检索入口：围绕一个或多个 seed 找候选时间路径，应用关系/语义/时间筛选，并可补充 hybrid retriever 的结果。
+# 核心检索入口：围绕一个或多个 seed 找候选时间路径，应用关系/语义/时间筛选，并可补充 hybrid retriever 的结果。
     def intelligent_retrieve(self, entity: Union[str, List[str]], 
                            subquestion: str,
                            time_constraint: str = None,
@@ -2373,7 +2399,7 @@ Return JSON like: {{"selected_paths": [1, 3, 5], "reason": "brief explanation"}}
                              selection_mode: str = "llm",         # 'llm'|'first'|'last'|'none'
                              limit: Optional[int] = None) -> Dict[str, Any]:
         """
-        unified pipeline (for 8 tool packages reuse):
+        统一检索流程（供多个工具复用）：
         1) pull all entity relations
         2) relation selection (auto/top3/all)
         3) one-time pull all → relation filtering → self-loop filtering → direction standardization → (multiple seeds) entity similarity filtering
@@ -2394,6 +2420,7 @@ Return JSON like: {{"selected_paths": [1, 3, 5], "reason": "brief explanation"}}
 
             selected_paths = []
             selected_relations = []
+            # 标准化成实体列表，下面的多实体分支才能逐对寻找直接连接。
             if isinstance(entity, list):
                 original_entity = entity
             else:
@@ -2403,6 +2430,7 @@ Return JSON like: {{"selected_paths": [1, 3, 5], "reason": "brief explanation"}}
                     
             # if direct connection cannot find enough path, or non-direct connection type, execute regular retrieval
             for entity in original_entity:
+                # 多实体题先找同一条边上同时出现的种子；有结果时仍继续后续聚合。
                 if len(original_entity) > 1:
                     print(f"🔍 detect direct connection mode for entities: {original_entity}") 
                     all_edges = self._find_all_direct_connections(original_entity, time_constraint, constraint_type, subquestion_obj)

@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# =============================
+# file: experiment_database.py
+# =============================
+# 职责：实验结果落库（experiments/experiments_<dataset>.db，按数据集分库）：
+#   configurations(实验配置) / runs(运行批次) / question_results(逐题答案)
+#   / trajectories(推理轨迹) / evidence_edges(证据边)。main.py 每题结束后写入。
 
 import sqlite3
 import json
@@ -306,8 +312,9 @@ class ExperimentDatabase:
         """, (config_id,))
         
         row = cursor.fetchone()
-        current_best = row[0] if row else 0.0
-        
+        # best_success_rate 可能为 NULL（清理/新建配置后），None 不能与 float 比较
+        current_best = row[0] if (row and row[0] is not None) else 0.0
+
         if success_rate > current_best:
             # Update best record
             cursor.execute("""
@@ -426,28 +433,54 @@ class ExperimentDatabase:
     def _load_question_metadata(self, qid: str) -> Dict[str, Any]:
         """Load question metadata from test.json"""
         try:
-            from ..config import TPKGConfig
-            # Use raw test data path (test.json) not the candidates file
-            test_data_path = TPKGConfig.get_raw_test_data_path()
-        except:
+            from ..config import TPKGConfig  # 作为包成员导入时
+        except (ImportError, ValueError):
+            try:
+                from config import TPKGConfig  # run.py 顶层导入方式（experiment_database 是顶层模块，相对导入必失败）
+            except Exception:
+                TPKGConfig = None
+        try:
+            if TPKGConfig is not None:
+                # Use raw test data path (test.json) not the candidates file
+                test_data_path = TPKGConfig.get_raw_test_data_path()
+            else:
+                raise RuntimeError("TPKGConfig unavailable")
+        except Exception:
             # Fallback: try to determine from dataset
             test_data_path = str(Path(__file__).parent.parent / "Data" / "MultiTQ" / "test.json")
         
         try:
             with open(test_data_path, 'r', encoding='utf-8') as f:
                 test_data_list = json.load(f)
-            
-            qid_int = int(qid)
+
+            # 兼容两数据集的 ID 字段：MultiTQ 用 quid(int)，TimeQuestions 用 Id(str)
+            qid_str = str(qid)
             for test_item in test_data_list:
-                if test_item.get('quid') == qid_int:
-                    return {
-                        'answer_type': test_item.get('answer_type', None),
-                        'time_level': test_item.get('time_level', None),
-                        'golden_answers': json.dumps(test_item.get('answers', []), ensure_ascii=False),
-                        'qlabel': test_item.get('qlabel', None),
-                        'topics': json.dumps(test_item.get('topics', []), ensure_ascii=False),
-                        'qtype': test_item.get('qtype', None)  # Add question type
-                    }
+                item_id = test_item.get('quid', test_item.get('Id'))
+                if str(item_id) != qid_str:
+                    continue
+                # 金标准：MultiTQ 是 answers 列表，TimeQuestions 是 Answer 字符串
+                answers = test_item.get('answers')
+                if answers is None:
+                    answers = test_item.get('Answer')
+                if isinstance(answers, (list, dict)):
+                    golden = json.dumps(answers, ensure_ascii=False)
+                else:
+                    golden = str(answers) if answers is not None else None
+                topics = test_item.get('topics', [])
+                # TimeQuestions 的题型字段是 'Temporal question type' 且为 list（如 ['Temp.Ans']），
+                # SQLite 只接受标量，统一转字符串
+                qtype = test_item.get('qtype') or test_item.get('Temporal question type', None)
+                if isinstance(qtype, (list, dict)):
+                    qtype = json.dumps(qtype, ensure_ascii=False)
+                return {
+                    'answer_type': test_item.get('answer_type', None),
+                    'time_level': test_item.get('time_level', None),
+                    'golden_answers': golden,
+                    'qlabel': test_item.get('qlabel', None),
+                    'topics': json.dumps(topics, ensure_ascii=False) if isinstance(topics, (list, dict)) else topics,
+                    'qtype': qtype
+                }
         except Exception as e:
             print(f"⚠️  Load question {qid} metadata failed: {e}")
         

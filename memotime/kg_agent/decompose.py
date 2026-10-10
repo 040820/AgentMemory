@@ -2,6 +2,9 @@
 # =============================
 # file: kg_agent/decompose.py
 # =============================
+# 职责：LLM 问题分解。按题型/时序信号选择 fixed_prompts.py 中的分解 prompt，
+#   输出 DecompositionResult（Indicator 待验证关系边 + SubQuestion 子问题列表），
+#   由 stepwise.solve_with_decomposition 驱动逐步执行与再分解。
 import re
 import json
 from dataclasses import dataclass, asdict
@@ -25,6 +28,8 @@ from .fixed_prompts import (
 from .llm import LLM
 
 @dataclass
+# 分解结果的最小证据单元：subj --[rel]--> obj 发生于 time_var。
+# subj/obj 可以是实体名或 ?x 一类待求变量；time_var（如 t1）由后续检索结果绑定。
 class IndicatorEdge:
     subj: str
     rel: str
@@ -33,17 +38,20 @@ class IndicatorEdge:
 
 @dataclass
 class Indicator:
+    # edges 描述要找的图谱关系，constraints 保存 t1 < t2 等时间条件文本。
     edges: List[IndicatorEdge]
     constraints: List[str]
 
 @dataclass
 class SubQuestion:
+    # sid 标识子问题；depends_on 记录它依赖的前序变量，执行期共享 ctx 负责传值。
     sid: str
     text: str
     indicator: Indicator
     depends_on: List[str]
 
 class DecompositionResult(NamedTuple):
+    # 整题分解产物：有序子问题、时间变量名、题型，以及解析不足时的补问信息。
     subquestions: List[SubQuestion]
     time_vars: List[str]
     question_type: str
@@ -114,9 +122,11 @@ Return JSON:
     return response
 
 def detect_question_type(question: str) -> str:
+    """先用词面规则识别组合时间算子，再将未命中的问题交给 LLM 分类。"""
     question_lower = question.lower()
 
     print("rule-based classification")
+    # 组合题型优先于单个 after/first，供后面的专用分解提示和工具选择使用。
     if "after" in question_lower and "first" in question_lower.lower():
             return "after_first"
     
@@ -506,6 +516,11 @@ def parse_simple_text_response(response: str) -> Optional[Dict[str, Any]]:
         return None
 
 def convert_simple_to_structured(simple_result: Dict[str, Any], question_type: str = "default") -> DecompositionResult:
+    """把模型解析出的文本列表变成可由 stepwise.py 逐题执行的结构。
+
+    simple_result 包含 subquestions、indicators、constraints、time_vars；
+    返回值中的每个 SubQuestion 带关系边、时间约束及简化的依赖标记。
+    """
     subquestions = []
     
     for i, subq_text in enumerate(simple_result["subquestions"], 1):
@@ -523,7 +538,7 @@ def convert_simple_to_structured(simple_result: Dict[str, Any], question_type: s
                     time_var=time_var.strip()
                 ))
         
-        # create constraints
+        # 当前实现把整个 constraints 列表复制给每个子问题，并未按子问题单独分配。
         constraints = []
         if i <= len(simple_result["constraints"]):
             constraints = [c.strip() for c in simple_result["constraints"] if c.strip()]
@@ -532,7 +547,7 @@ def convert_simple_to_structured(simple_result: Dict[str, Any], question_type: s
         indicator = Indicator(edges=edges, constraints=constraints)
         depends_on = []
         
-        # simple dependency detection
+        # 这里只检查子问题文本是否包含 t1；不是通用的依赖图解析或拓扑排序。
         if "t1" in subq_text and i > 1:
             depends_on = ["t1"]
         
@@ -700,6 +715,7 @@ def fallback_decompose_temporal_before(question: str) -> Optional[DecompositionR
 
    
 def TL_enhandced_decompose_question(question: str, question_type: str) -> str:
+    """检索同题型的成功分解样例，拼成提示词前缀；无样例时返回空前缀。"""
     # use template enhanced decomposition question
     try:
         # first try to get examples from enhanced unified knowledge storage
@@ -712,6 +728,7 @@ def TL_enhandced_decompose_question(question: str, question_type: str) -> str:
             except:
                 experiment_setting = None
             
+            # 相似样例仅进入 LLM 提示，不直接代替当前问题的分解结果。
             examples = get_question_decomposition_enhanced(
                 given_question=question,
                 topk=10,
@@ -757,6 +774,8 @@ def TL_enhandced_decompose_question(question: str, question_type: str) -> str:
         print(f"❌ Classification test failed: {e}")
         return ""
 
+# 主流程：识别题型 → 取同题型经验作为提示 → LLM 分解 → 解析并检查质量。
+# max_retries 只控制本函数的模型请求/解析重试，与整题求解重试分开计数。
 def decompose_question(question: str, max_retries: int = 3) -> DecompositionResult:
     # detect question type
     question_type = detect_question_type(question)
@@ -817,13 +836,14 @@ def decompose_question(question: str, max_retries: int = 3) -> DecompositionResu
             
             if simple_result:
                 print("successfully parsed text format")
-                # 转换为结构化结果
+                # 文本/JSON 先被统一成简单字典，再生成 SubQuestion、IndicatorEdge 和时间变量。
                 result = convert_simple_to_structured(simple_result, question_type)
                 
                 # analyze decomposition quality and generate further question
                 analysis = analyze_decomposition_quality(result, question, question_type)
                 print(f"decomposition quality analysis: {analysis}")
                 
+                # 复合时间题若缺少必要子问题，可附加 further_question 交给上层再处理。
                 if analysis["needs_clarification"]:
                     print("detected need clarification, generate further question...")
                     
@@ -884,6 +904,8 @@ def decompose_question(question: str, max_retries: int = 3) -> DecompositionResu
 
 # ---- seeds ----
 
+# 根据子问题文本与 indicator 中的实体，从题目候选实体里选检索起点；字符串匹配无结果时再调用 LLM。
+# 根据子问题文本与 indicator 中的实体，从题目候选实体里选检索起点；字符串匹配无结果时再调用 LLM。
 def select_seeds_for_subq(subq: SubQuestion, topic_entities: List[Dict[str, Any]]) -> List[int]:
     """improved seed selection logic"""
     picks: List[int] = []

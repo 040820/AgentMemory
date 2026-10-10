@@ -13,13 +13,11 @@ from typing import Dict, List, Optional, Tuple
 import sqlite3
 from datetime import datetime
 
-# OpenAI embedding
+# 本地 BGE-M3 embedding（替代 OpenAI embeddings API，MiMo 无 embeddings 端点）
 try:
-    import openai
-    OPENAI_AVAILABLE = True
+    from kg_agent.local_embed import embed_texts
 except ImportError:
-    OPENAI_AVAILABLE = False
-    print("Warning: openai not available. Using fallback embedding.")
+    from memotime.kg_agent.local_embed import embed_texts
 
 class RelationEmbeddingCache:
     """relation embedding cache system"""
@@ -33,20 +31,7 @@ class RelationEmbeddingCache:
         
         # ensure cache directory exists
         os.makedirs(cache_dir, exist_ok=True)
-        
-        # initialize OpenAI client
-        self.openai_client = None
-        if OPENAI_AVAILABLE:
-            try:
-                from kg_agent.llm import DEFAULT_OPENAI_API_KEY
-                # use environment variable or directly set API key
-                api_key = os.getenv('OPENAI_API_KEY', DEFAULT_OPENAI_API_KEY)
-                self.openai_client = openai.OpenAI(api_key=api_key)
-                print("✅ OpenAI client initialized successfully")
-            except Exception as e:
-                print(f"❌ OpenAI client initialization failed: {e}")
-                self.openai_client = None
-        
+
         # load cached embeddings
         self.embeddings = self._load_embeddings()
         self.metadata = self._load_metadata()
@@ -114,19 +99,11 @@ class RelationEmbeddingCache:
             print(f"❌ save metadata failed: {e}")
     
     def get_openai_embedding(self, text: str) -> Optional[np.ndarray]:
-        """use OpenAI to get embedding"""
-        if not self.openai_client:
-            return None
-        
+        """use local BGE-M3 to get embedding (方法名保留以兼容既有调用)"""
         try:
-            response = self.openai_client.embeddings.create(
-                model="text-embedding-3-small",  # use the latest embedding model
-                input=text
-            )
-            embedding = np.array(response.data[0].embedding, dtype=np.float32)
-            return embedding
+            return embed_texts([text])[0]
         except Exception as e:
-            print(f"❌ OpenAI embedding failed: {e}")
+            print(f"❌ local embedding failed: {e}")
             return None
     
     def normalize_relation_text(self, relation: str) -> str:
@@ -175,11 +152,8 @@ class RelationEmbeddingCache:
             print("❌ no relations found, cannot precompute")
             return
         
-        # check OpenAI availability
-        if not self.openai_client:
-            print("❌ OpenAI client unavailable, cannot precompute")
-            return
-        
+        # check embedding availability (local BGE-M3, 惰性加载)
+
         # precompute embedding and name mapping
         new_embeddings = {}
         new_name_mapping = {}
@@ -216,7 +190,7 @@ class RelationEmbeddingCache:
             'last_update': datetime.now().isoformat(),
             'total_relations': len(all_relations),
             'processed_relations': processed_count,
-            'model': 'text-embedding-3-small',
+            'model': 'BAAI/bge-m3',
             'normalization': 'underscore_to_space_lowercase'
         }
         self.metadata = metadata

@@ -4,8 +4,16 @@
 import os
 import time
 from typing import List, Dict, Any
+from pathlib import Path
 
-# DEFAULT_OPENAI_API_KEY="XXX"
+# 加载项目根目录 .env（MiMo key/base_url/model、LLM_MODEL 等配置）
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+except Exception:
+    pass
+
+DEFAULT_OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "XXX")
 DEFAULT_DASHSCOPE_API_KEY="XXX"
 DEFAULT_GOOGLE_API_KEY="XXX"
 DEFAULT_DEEPSEEK_API_KEY="XXX"
@@ -15,8 +23,19 @@ DEFAULT_LOCAL_OPENAI_KEY="EMPTY"
 Deep_infra_API_KEY= "XXX"
 new_llama_api_key = "XXX"
 
+# --- Xiaomi MiMo (OpenAI compatible): 配置在项目根 .env 文件 ---
+DEFAULT_MIMO_API_KEY = os.getenv("MIMO_API_KEY", "")                    # 你的 MiMo API Key
+DEFAULT_MIMO_BASE_URL = os.getenv("MIMO_BASE_URL", "https://api.xiaomimimo.com/v1")  # MiMo 服务地址
+DEFAULT_MIMO_MODEL = os.getenv("MIMO_MODEL", "mimo-v2.6-flash")         # 实际调用的模型名
+
+# 统一模型调用门面。业务代码只调用 LLM.call；本类根据 model 参数选择服务、组装消息并处理重试。
+# 凭据应由环境变量/启动配置提供；不要在注释、日志或版本库中记录密钥值。
+# 统一模型调用门面。业务代码只调用 LLM.call；本类根据 model 参数选择服务、组装消息并处理重试。
+# 凭据应由环境变量/启动配置提供；不要在注释、日志或版本库中记录密钥值。
 class LLM:
     @staticmethod
+# 所有分类、分解、工具规划、路径选择和答案生成请求最终汇入这里；model=None 时读取 TPKGConfig 默认模型。
+# 所有分类、分解、工具规划、路径选择和答案生成请求最终汇入这里；model=None 时读取 TPKGConfig 默认模型。
     def call(system: str, prompt: str, model: str = None, temperature: float = 0.4) -> str:
         # if model is not specified, read from configuration
         if model is None:
@@ -172,14 +191,15 @@ class LLM:
             messages = _mk_messages(sys_msg, user_msg)
             return _chat_with_openai_client(client, resolved_model, messages, temperature)
 
-        # --- Qwen (DashScope compatible OpenAI) ---
+        # --- Qwen (自部署 vLLM 优先，否则 DashScope，均为 OpenAI 兼容) ---
         elif "qwen" in model:
             if OpenAI is None:
                 raise RuntimeError("openai SDK not installed, cannot call OpenAI compatible interface.")
             api_key = os.getenv("DASHSCOPE_API_KEY", DEFAULT_DASHSCOPE_API_KEY) or os.getenv("QWEN_API_KEY")
             if not api_key:
                 raise RuntimeError("missing DASHSCOPE_API_KEY or QWEN_API_KEY environment variable.")
-            base_url = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
+            # QWEN_BASE_URL 指向自部署 vLLM（如 http://10.11.154.236:8011/v1）；未设则走阿里云 DashScope
+            base_url = os.getenv("QWEN_BASE_URL") or os.getenv("DASHSCOPE_BASE_URL", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
             client = OpenAI(api_key=api_key, base_url=base_url)
             if "qwen3-80b" in model:
                 resolved_model = "qwen3-next-80b-a3b-instruct"
@@ -187,12 +207,32 @@ class LLM:
                 resolved_model = model
             resolved_model = resolved_model
             messages = _mk_messages(sys_msg, user_msg)
-            # compatible with your original extra_body
+            # 关闭 Qwen3 思考模式（否则回复以  污染 JSON）。两种后端写法不同：
+            #   自部署 vLLM → chat_template_kwargs；阿里云 DashScope → 顶层 enable_thinking
+            if os.getenv("QWEN_BASE_URL"):
+                extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
+            else:
+                extra_body = {"enable_thinking": False}
             return _chat_with_openai_client(
                 client, resolved_model, messages,
                 temperature=temperature, max_tokens=2048,
-                extra_body={"enable_thinking": False}
+                extra_body=extra_body
             )
+
+# MiMo 走 OpenAI 兼容客户端：需要正确的 base_url、模型名和环境变量密钥；其错误会在上层按检索/生成阶段处理。
+# MiMo 走 OpenAI 兼容客户端：需要正确的 base_url、模型名和环境变量密钥；其错误会在上层按检索/生成阶段处理。
+        # --- Xiaomi MiMo (OpenAI compatible) ---
+        elif "mimo" in model:
+            if OpenAI is None:
+                raise RuntimeError("openai SDK not installed, cannot call OpenAI compatible interface.")
+            api_key = os.getenv("MIMO_API_KEY", DEFAULT_MIMO_API_KEY)
+            if not api_key or api_key == "XXX":
+                raise RuntimeError("missing MIMO_API_KEY (set env MIMO_API_KEY or edit DEFAULT_MIMO_API_KEY in llm.py).")
+            base_url = os.getenv("MIMO_BASE_URL", DEFAULT_MIMO_BASE_URL)
+            client = OpenAI(api_key=api_key, base_url=base_url)
+            resolved_model = DEFAULT_MIMO_MODEL if model == "mimo" else model
+            messages = _mk_messages(sys_msg, user_msg)
+            return _chat_with_openai_client(client, resolved_model, messages, temperature)
 
         # --- fallback: local OpenAI compatible gateway ---
         else:

@@ -4,15 +4,30 @@
     TPKG simplified running script  
 """
 
+# MemoTime 命令行入口：解析数据集、模型、检索开关和实验范围。
+# 本文件分两条路径：--result 查询已有实验；普通模式把参数交给 main.py 执行。
 import argparse
 import os
 import sys
 import json
 import os
 
-# Set CUDA_VISIBLE_DEVICES to make only GPU 0 visible
-os.environ["CUDA_VISIBLE_DEVICES"] = "3" 
+# Windows 控制台默认 GBK，库内 print(✅) 会 UnicodeEncodeError，切到 UTF-8
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
+# Set CUDA_VISIBLE_DEVICES to make only GPU 0 visible
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
+
+# 入口函数负责把命令行参数转换成 argparse Namespace。
+# 注意：此处只做参数和流程分发；逐题推理主体在 main.py 与 kg_agent/stepwise.py。
+# 入口函数负责把命令行参数转换成 argparse Namespace。
+# 注意：此处只做参数和流程分发；逐题推理主体在 main.py 与 kg_agent/stepwise.py。
+# 入口函数负责把命令行参数转换成 argparse Namespace。
+# 注意：此处只做参数和流程分发；逐题推理主体在 main.py 与 kg_agent/stepwise.py。
 def main():
     parser = argparse.ArgumentParser(
         description='TPKG experiment running tool - simplified version',
@@ -39,7 +54,8 @@ Preset configurations:
   full_optimization  - full optimization
         """
     )
-    
+
+# 数据集决定使用哪套测试问题、知识图谱数据库和实体索引；name/desc/tags 用于标记本次实验。
     # ========== experiment configuration ==========
     exp_group = parser.add_argument_group('experiment configuration')
     exp_group.add_argument('--dataset', type=str, 
@@ -53,6 +69,8 @@ Preset configurations:
     exp_group.add_argument('--tags', type=str, default='',
                           help='experiment tags (comma separated)') 
     
+
+# 预设是一组可复用的参数组合；命令行显式参数稍后会覆盖预设中的同名值。
     # ========== preset configuration ==========
     preset_group = parser.add_argument_group('preset configuration')
     preset_group.add_argument('--preset', '-p', type=str, 
@@ -66,6 +84,8 @@ Preset configurations:
                                      'retry2_accuracy_mode_individual_10q'],
                              help='use preset configuration')
     
+
+# 核心推理预算：重试次数、分解深度和分支数会限制推理成本及问题拆解规模。
     # ========== core parameters ==========
     core_group = parser.add_argument_group('core parameters')
     core_group.add_argument('--retries', '-r', type=int, default=None,
@@ -74,7 +94,8 @@ Preset configurations:
                            help='maximum decomposition depth (default: 3)')
     core_group.add_argument('--branches', '-b', type=int, default=None,
                            help='maximum branches (default: 5)')
-    
+
+# 功能开关控制混合检索和统一知识存储；None 表示让 config.py 的默认值或预设决定。
     # ========== feature switches ==========
     feature_group = parser.add_argument_group('feature switches')
     feature_group.add_argument('--hybrid', action='store_true',
@@ -89,6 +110,8 @@ Preset configurations:
     feature_group.add_argument('--no-unified-knowledge', dest='unified_knowledge', action='store_false',
                               help='disable unified knowledge store')
     
+
+# shared 在不同实验间共享经验数据；individual 隔离经验库。fallback 决定 individual 未命中时能否读共享库。
     # ========== storage mode ==========
     storage_group = parser.add_argument_group('storage mode')   
     storage_group.add_argument('--storage-mode', type=str, choices=['shared', 'individual'],
@@ -98,6 +121,9 @@ Preset configurations:
     storage_group.add_argument('--config-name', type=str, default=None,
                               help='configuration name (used for database path), for example: retry2_depth3_branch20_hybrid_unified_individual_nofallback_gpt4mini')
     
+# questions/skip/type/entities 控制评测子集，适合先做小样本调试再跑完整集合。
+# questions/skip/type/entities 控制评测子集，适合先做小样本调试再跑完整集合。
+# questions/skip/type/entities 控制评测子集，适合先做小样本调试再跑完整集合。
     # ========== experiment range ==========
     range_group = parser.add_argument_group('experiment range') 
     range_group.add_argument('--questions', '-q', type=int, default=None,
@@ -110,6 +136,9 @@ Preset configurations:
     range_group.add_argument('--entities', '-e', type=int, default=None,
                             help='candidate entity number (default: 10)')
     
+# 模型字符串传给配置层，再由 kg_agent/llm.py 按名称路由到对应服务。
+# 模型字符串传给配置层，再由 kg_agent/llm.py 按名称路由到对应服务。
+# 模型字符串传给配置层，再由 kg_agent/llm.py 按名称路由到对应服务。
     # ========== LLM configuration ==========
     llm_group = parser.add_argument_group('LLM configuration')
     llm_group.add_argument('--model', '-m', type=str, default=None,
@@ -129,6 +158,9 @@ Preset configurations:
     
     args = parser.parse_args()
     
+# 结果查询分支不会启动推理：它根据数据集和配置参数定位实验记录，汇总历史准确率与分组统计后退出。
+# 结果查询分支不会启动推理：它根据数据集和配置参数定位实验记录，汇总历史准确率与分组统计后退出。
+# 结果查询分支不会启动推理：它根据数据集和配置参数定位实验记录，汇总历史准确率与分组统计后退出。
     # ========== if it is query result mode, directly query and exit ==========
     if args.result:
         from config import TPKGConfig, apply_config, ExperimentPresets
@@ -595,6 +627,9 @@ Preset configurations:
     
     print("=" * 80 + "\n")
     
+# 普通运行分支把解析后的 args 直接传给 main.run_experiment；sys.argv 被重置是为了兼容旧代码读取命令行的习惯。
+# 普通运行分支把解析后的 args 直接传给 main.run_experiment；sys.argv 被重置是为了兼容旧代码读取命令行的习惯。
+# 普通运行分支把解析后的 args 直接传给 main.run_experiment；sys.argv 被重置是为了兼容旧代码读取命令行的习惯。
     # ========== directly import and run main module (pass parameters)==========
     
     # set sys.argv so that main.py can access parameters

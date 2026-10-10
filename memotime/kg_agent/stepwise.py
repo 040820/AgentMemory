@@ -2,6 +2,11 @@
 # =============================
 # file: kg_agent/stepwise.py
 # =============================
+# 职责：核心推理引擎（单题求解）。流程：
+#   原题分解(decompose.py) → 逐子问题：种子选择 → 工具选择 → 图查询(temporal_kg_toolkit)
+#   → 子问题充分性检查(LLM) → 不充分则再分解/换工具/重试 → 汇总证据 → 最终答案与充分性验证。
+# 调用链：run.py → main.run_experiment → solve_with_decomposition(本文件)；
+#   结果 trajectory/evidence 由 main.py 写入 experiment_database。
 import json
 import numpy as np
 import re
@@ -230,13 +235,15 @@ def id_to_name_list(id: int) -> str:
     return KG.get_entity_name(id)
 
 def execute_indicator_with_toolkit(subq, seeds: List[int], ctx: Dict[str, Any], question_type: str = None, subq_index: int = 0) -> Dict[str, Any]:
-    """
-    Execute indicator using intelligent toolkit selection
+    """按当前子问题选择时间 KG 算子并执行。
+
+    subq 给出问题文本和 Indicator；seeds 是已选实体 ID；ctx 提供前序答案/时间；
+    question_type、subq_index 用于题型和步骤相关的参数修正。返回候选证据、答案及工具配置。
     """
     # Get toolkit instance
     toolkit = KG.get_toolkit()
     
-    # Use intelligent toolkit selection
+    # 选择器根据子问题、种子和共享上下文给出工具名及参数；可能返回多个不同工具。
     toolkit_config = intelligent_toolkit_selection(subq, seeds, ctx, question_type)
     # from .intelligent_toolkit_selector import id_to_name
 
@@ -264,6 +271,7 @@ def execute_indicator_with_toolkit(subq, seeds: List[int], ctx: Dict[str, Any], 
             unique_methods.add(method_name)
     
     print(f"🔍 Unique methods: {unique_methods}")
+    # 多种工具各执行一次并合并结果；只有一个工具时继续下方单工具分支。
     if len(unique_methods) > 1:
         print(f"Detected {len(unique_methods)} distinct toolkit methods, will try multiple retrieval requests...")
         
@@ -286,8 +294,7 @@ def execute_indicator_with_toolkit(subq, seeds: List[int], ctx: Dict[str, Any], 
         method_name = toolkit_config['method_name']
         params = toolkit_config['parameters'].copy()
         
-        # Force use seeds as entity parameters (seeds are already intelligently selected)
-        # Seeds should take priority over LLM's entity selection in parameters
+        # 实体参数以已选 seeds 为准，避免提示词生成的实体名与实际候选 ID 不一致。
         if seeds:
             if len(seeds) == 1:
                 # Single seed: always override entity parameter
@@ -305,6 +312,7 @@ def execute_indicator_with_toolkit(subq, seeds: List[int], ctx: Dict[str, Any], 
                 print(f"✅ Using seed entities {seeds[:3]} as query entities (override)")
         
         # For some methods, ensure necessary parameters
+        # after_first 需要前一步确定的参考时刻；缺参数时从 ctx.times 取首个时间值。
         if method_name == "find_after_first" and 'reference_time' not in params:
             # Extract reference time from context or subquestion
             if ctx.get('times'):
@@ -321,7 +329,7 @@ def execute_indicator_with_toolkit(subq, seeds: List[int], ctx: Dict[str, Any], 
                 params['relation'] = relation
                 print(f"Using subquestion relation {relation} as query relation")
         
-        # After First optimization: checkfirstSubquestionrelation，inaftercontinueSubquestioninasasprecisequeryrelation
+        # 后续步骤可从 s1 的证据中提取关系，替换当前工具参数里的泛化关系。
         first_answer = ctx.get("answers", {}).get("s1", {})
         if first_answer and subq_index > 0:  # forfirstSubquestionafterquestions
             # extractaccuraterelationinformation
@@ -719,8 +727,12 @@ def execute_indicator(subq, seeds: List[int], ctx: Dict[str, Any]) -> Dict[str, 
 
 
 
+# 单题推理主控制器：分解问题、维护共享上下文、逐子问题检索并检查证据，最后合成答案。
+# “Tree of Time”在这里体现为可细化的子问题列表及其依赖状态，并非独立的树节点类。
+# 这是逐题推理的主控制器：分解问题、维护上下文、为每个子问题选种子/工具、检索证据、做充分性检查并合成答案。
+# 实现上主要用可插入子问题的列表和 ctx 状态推进，并非单独的 Tree 节点类；失败后可继续细化或重试。
 def solve_with_decomposition(agent, question: str, topic_entities: List[Dict[str, Any]],
-                             max_retries: int = None, 
+                             max_retries: int = None,
                              max_depth: int = None,
                              max_branch: int = None,
                              quid: int = None,
@@ -728,6 +740,15 @@ def solve_with_decomposition(agent, question: str, topic_entities: List[Dict[str
                              use_template_learning: bool = None,
                              storage_mode: str = None,
                              llm_model: str = None) -> Dict[str, Any]:
+    """求解一题：分解 → 选种子/工具 → 检索 → 局部检查 → 最终检查。
+
+    question 为原题，topic_entities 是预处理得到的候选实体；max_retries、
+    max_depth、max_branch 分别限制整题重试、细化深度和分支数；quid 用于答案核验；
+    use_hybrid 控制是否补充混合检索；storage_mode/llm_model 标识实验设置。
+    当前函数会把 use_template_learning 强制设为 False，不应按传入值理解行为。
+    返回字典通常包含 ok、final_answer、trajectory、reasoning_path；
+    有 quid 时还可能附带 learning 核验信息，失败路径返回字段可能不同。
+    """
     try:
         try:
             from ..config import TPKGConfig
@@ -940,6 +961,12 @@ def solve_with_decomposition(agent, question: str, topic_entities: List[Dict[str
             return None
 
     # --- subquestion action execute, only support three actions ---
+# 充分性检查未通过时的恢复策略：进一步分解、改写子问题，或放宽检索参数后重试。
+# max_depth 与 max_branch 在这里约束递归扩展，防止分解无限增长。
+# 充分性检查未通过时的恢复策略：进一步分解、改写子问题，或放宽检索参数后重试。
+# max_depth 与 max_branch 在这里约束递归扩展，防止分解无限增长。
+# 充分性检查未通过时的恢复策略：进一步分解、改写子问题，或放宽检索参数后重试。
+# max_depth 与 max_branch 在这里约束递归扩展，防止分解无限增长。
     def _apply_action_for_subq(action: str,
                                updated_subq,
                                ctx: Dict[str, Any],
@@ -1031,6 +1058,9 @@ def solve_with_decomposition(agent, question: str, topic_entities: List[Dict[str
         _set_cfg("score_threshold", max(0.0, float(tk_cfg.get("score_threshold", 0.5)) - 0.05))
         return {"continue_same_subq": True, "depth_increased": False}
 
+# 最外层重试从原始问题重新分解；每次循环都会重建该轮的上下文和轨迹，避免旧轮局部状态污染新尝试。
+# 最外层重试从原始问题重新分解；每次循环都会重建该轮的上下文和轨迹，避免旧轮局部状态污染新尝试。
+# 最外层重试从原始问题重新分解；每次循环都会重建该轮的上下文和轨迹，避免旧轮局部状态污染新尝试。
     while original_decompose_retry_count < max_original_decompose_retries:
         print("="*100)
         print("Start solving problem")
@@ -1041,6 +1071,9 @@ def solve_with_decomposition(agent, question: str, topic_entities: List[Dict[str
         print("="*100)
 
         with monitor.monitor_stage("Question Classification and Decomposition"):
+# LLM 将原问题转成带 question_type、子问题、指标和依赖关系的结构化结果。
+# LLM 将原问题转成带 question_type、子问题、指标和依赖关系的结构化结果。
+# LLM 将原问题转成带 question_type、子问题、指标和依赖关系的结构化结果。
             dec = decompose_question(question)
         if original_decompose_retry_count == 0:
             original_decomposition = dec  # save original decomposition
@@ -1052,6 +1085,8 @@ def solve_with_decomposition(agent, question: str, topic_entities: List[Dict[str
         subquestion_texts = [subq.text for subq in dec.subquestions]
         set_decomposition_info(question, subquestion_texts, "llm_decomposition")
 
+# ctx 是本次求解的共享状态：times/answers 保存前序结果，entities 保存答案实体映射，
+# answer_edges 保存通过局部验证的证据；time_constraints 供下一子问题替换 t1 等变量。
         ctx: Dict[str, Any] = {"times": {}, "answers": {}, "entities": {}, "answer_edges": [], "time_constraints": {}, "question_type": dec.question_type}
         trajectory: List[Dict[str, Any]] = []
         reasoning_path: List[Dict[str, Any]] = []
@@ -1062,6 +1097,7 @@ def solve_with_decomposition(agent, question: str, topic_entities: List[Dict[str
         subquestion_retry_states: Dict[int, int] = {}
         current_depth = 1  # when top decomposition depth, original decomposition depth=1
 
+# 按列表顺序处理子问题；失败时可能插入更细的子问题，因此每轮重新检查列表长度。
         while subq_index < len(dec.subquestions):
             subq = dec.subquestions[subq_index]
             current_subq_retry = subquestion_retry_states.get(subq_index, 0)
@@ -1094,6 +1130,8 @@ def solve_with_decomposition(agent, question: str, topic_entities: List[Dict[str
                     except Exception as e:
                         return (False, f"Sufficiency check failed: {e}")
                 
+# 当前版本未在这里调用经验检索：pool_result 固定为 None，下方命中后直接复用证据的
+# 分支不会执行。其他位置的经验样例检索仍可能用于分解/选种子/选工具的提示。
                 pool_result = None
 
                 if pool_result:
@@ -1139,6 +1177,7 @@ def solve_with_decomposition(agent, question: str, topic_entities: List[Dict[str
                     # experience pool not hit，execute original process
                     print("⚪ Experience poolnot hit，Execute original retrieval process")
                     enhanced_prompt = get_seeds_enhanced_prompt(updated_subq.text, dec.question_type)
+# topic_entities 来自数据预处理；这里结合当前子问题和 ctx 选出实际查询的实体 ID。
                     seeds = intelligent_seed_selection(updated_subq, topic_entities, ctx, enhanced_prompt)
                     print(f"Selected {len(seeds)} seed entities: {seeds[:5]}...")
                     print("="*100)
@@ -1151,6 +1190,7 @@ def solve_with_decomposition(agent, question: str, topic_entities: List[Dict[str
                                 break
                     print(f"Selected seed names: {selected_seed_names}")
 
+# 工具选择与执行产出候选事实、答案和时间；局部充分性检查随后决定能否写入 ctx。
                     step = execute_indicator_with_toolkit(updated_subq, seeds, ctx, dec.question_type, subq_index)
                     step_answer_souce = "new_retrieval"
             success = False
@@ -1169,6 +1209,7 @@ def solve_with_decomposition(agent, question: str, topic_entities: List[Dict[str
                         print("Sufficiency_test for subquestion: ", updated_subq.text)
                         print("="*30)
                         try:
+# 局部充分性检查同时查看候选证据、当前答案和 ctx；通过后才推进子问题索引。
                             sufficiency_test = test_answer_sufficiency(
                                 updated_subq.text, chosen_answer, step.get("candidates", []), ctx,
                                 [], step.get("toolkit_config", {}), step.get("debate_vote_result", {}),
@@ -1249,22 +1290,24 @@ def solve_with_decomposition(agent, question: str, topic_entities: List[Dict[str
 
                             # with monitor.monitor_stage("qa"):
                             if step.get("times"):
+# 将已验证的时间写入共享状态；后续子问题可把 t1 替换成具体日期。
                                 ctx["times"].update(step["times"])
                                 print(f"Updated times: {step['times']}")
                                 
-                                # Updatetimeconstraintsinformation，ensureaftercontinueSubquestion能够use
+                                # 同步建立时间变量到具体时间的映射，供 update_subquestion_with_context 使用。
                                 for time_key, time_value in step["times"].items():
                                     if time_key.startswith("s") or time_key.startswith("t"):  # Subquestiontime变量
                                         # add time value to above below text, for after continue subquestion use
                                         ctx["time_constraints"][time_key] = time_value
                                         
-                                        # special process：as after_firsttypequestions build t1 mapping
+                                        # 第一个子问题返回 s* 时间键时，额外建立 t1 → 参考时刻映射。
                                         if time_key.startswith("s") and subq_index == 0:  # firstSubquestion
                                             ctx["time_constraints"]["t1"] = time_value
                                             print(f"🕐 build t1 mapping: t1 -> {time_value}")
                                         
                                         print(f"🕐 Updatetimeconstraints {time_key}: {time_value}")
                             
+                            # 答案实体、证据路径和工具参数也随步骤保存，供后续推理及最终审查。
                             if step.get("answers"):
                                 ctx["answers"].update(step["answers"])
                                 if chosen_answer.get("entity"):
@@ -1445,6 +1488,7 @@ def solve_with_decomposition(agent, question: str, topic_entities: List[Dict[str
                         }
 
         if subq_index >= len(dec.subquestions):
+# 局部检查全过后，按时间整理已验证证据，并让最终充分性检查审视整条推理链。
             sorted_reasoning_path = build_temporal_reasoning_path(reasoning_path)
             # final_answer = generate_final_answer(question, sorted_reasoning_path)
             final_answer = ctx["answers"].get("final_answer", "")
@@ -1554,6 +1598,8 @@ def solve_with_decomposition(agent, question: str, topic_entities: List[Dict[str
                 "question": original_question,
                 "original_question": original_question,
                 "answer": fallback_result.get("final_answer", ""),
+                # main.py 存库读 final_answer 键；此前只写 answer 键导致 fallback 题判对但答案存空
+                "final_answer": fallback_result.get("final_answer", ""),
                 "reasoning": fallback_result.get("reason", ""),
                 "sufficient": False,  # mark as not sufficient
                 "fallback": True,  # mark as fallback answer
@@ -1688,24 +1734,29 @@ def log_retry_attempt(subq_index: int, retry_count: int, max_retries: int, strat
 
 
 def update_subquestion_with_context(subq, ctx: Dict[str, Any], step_num: int):
+    """用前序结果实例化后续子问题，返回新的 SubQuestion 而不直接修改原对象。
+
+    先把文本中的 t1 等时间变量替换为 ctx 中的值，再按条件更新关系边。
+    step_num 是当前子问题位置；现有关系复用分支仅在 step_num > 1 时进入。
+    """
 
     from .decompose import SubQuestion, Indicator, IndicatorEdge
     
     # Update subquestion text, replace Time variables
     updated_text = subq.text
     
-    # prioritize use time_constraints in values
+    # 优先使用显式 time_constraints，缺失时回退到原始 times。
     time_vars = ctx.get("time_constraints", {})
     if not time_vars:
         time_vars = ctx.get("times", {})
     
-    # replace time variables (including t1, t2 etc. generic time variables)
+    # 当前实现是字符串替换，不会检查变量边界；重复出现的同名文本也会被替换。
     for time_var, time_value in time_vars.items():
         if time_var in updated_text:
             updated_text = updated_text.replace(time_var, time_value)
             print(f"🕐 replace time variable {time_var} -> {time_value}")
     
-    # special process：if subquestion contains t1, t2 etc., but no corresponding value, attempt from abovebelow text in inference
+    # 仍残留 t1/t2 时再尝试从上下文推断，尤其处理第一个时间变量 t1。
     import re
     time_pattern = r'\bt\d+\b'  # match t1, t2, t3 等
     time_matches = re.findall(time_pattern, updated_text)
@@ -1792,7 +1843,7 @@ def update_subquestion_with_context(subq, ctx: Dict[str, Any], step_num: int):
             
             updated_edges.append(updated_edge)
     
-    # if no edges, keep original edges
+    # 若筛选没有留下边，复制原有边，避免后续检索失去全部关系线索。
     if not updated_edges:
         updated_edges = []
         for edge in subq.indicator.edges:
@@ -2507,15 +2558,16 @@ def get_toolkit_methods_info() -> str:
 
 
 def intelligent_toolkit_selection(subq, seeds: List[int], ctx: Dict[str, Any], question_type: str = None) -> Dict[str, Any]:
-    """
-    intelligentToolkit Selection：usenewintelligentToolkit Selection器
+    """根据题型、子问题、种子实体和已知时间选择工具及参数。
+
+    返回首选工具和 all_selections；无结果时回退为 retrieve_one_hop。
     """
     selector = get_intelligent_toolkit_selector()
     
     selected_toolkits = selector.select_toolkits(subq.text, seeds, ctx, question_type)
     
     if selected_toolkits:
-        # select priority max Toolkit
+        # 选择器已经排序；首项供单工具执行，完整列表供多工具分支判断。
         selected_toolkit = selected_toolkits[0]
         # print(f"intelligentselectToolkit: {selected_toolkit['toolkit_name']}")
         # print(f"select reason: {selected_toolkit['reasoning']}")
@@ -3511,6 +3563,10 @@ def execute_find_first_after(subq, seeds: List[int], ctx: Dict[str, Any], toolki
         return {"ok": False, "error": str(e)}
 
 
+# 局部证据评估器：结合子问题、候选证据、上下文、工具信息和推理路径，返回 sufficient/answer/reason/action。
+# action 会被上层控制器用于决定重试、改写或进一步分解。
+# 局部证据评估器：结合子问题、候选证据、上下文、工具信息和推理路径，返回 sufficient/answer/reason/action。
+# action 会被上层控制器用于决定重试、改写或进一步分解。
 def test_answer_sufficiency(subquestion: str, current_answer: Dict[str, Any], 
                           retrieved_info: List[Dict[str, Any]], 
                           context: Dict[str, Any], 
@@ -3519,22 +3575,13 @@ def test_answer_sufficiency(subquestion: str, current_answer: Dict[str, Any],
                           debate_vote_result: Dict[str, Any] = None,
                           top_paths: List[Dict[str, Any]] = None,
                           experiment_setting = None) -> Dict[str, Any]:
-    """
-    test Subquestion Answersufficientity
-    
-    Args:
-        subquestion: Subquestion text
-        current_answer: TopAnswer information
-        retrieved_info: retrieve to information
-            context: abovebelow text information
-        previous_subquestions: TopSubquestion and Answer
-        toolkit_info: use Toolkit information
-        debate_vote_result: Debate voteresultinformation
-            top_paths: LLMpathselectToptop3path
-        experiment_setting: experiment setting
-    
-    Returns:
-        sufficientity test result
+    """检查当前子问题的答案是否得到检索证据和时间上下文支持。
+
+    subquestion 是当前文本；current_answer 是候选答案；retrieved_info 是召回事实；
+    context 含前序时间与答案；previous_subquestions 是已有步骤；toolkit_info 保存
+    本步工具参数；debate_vote_result、top_paths 提供筛选过程和重点路径；
+    experiment_setting 控制实验隔离。返回含 sufficient、reason 等字段的字典，
+    主循环只有在 sufficient 为真时才推进并更新共享 ctx。
     """
     try:
         # build evidence path information - only display LLM select one paths
@@ -4158,20 +4205,12 @@ def test_final_answer_sufficiency(original_question: str,
                                 trajectory: List[Dict[str, Any]] = None,
                                 experiment_setting = None,
                                 ctx: Dict[str, Any] = None) -> Dict[str, Any]:
-    """
-    test FinalAnswer sufficientity
-    
-    Args:
-        original_question: originalquestions
-        final_answer: FinalAnswer
-            reasoning_path: reasoning KG_Path
-        all_info: all retrieval information
-        trajectory: complete Trajectory information, contain each Subquestion detailed information
-        experiment_setting: experiment setting
-        ctx: abovebelow text information, contains question type etc.
-    
-    Returns:
-        sufficientity test result
+    """在整题层面检查各子问题的证据能否共同回答原问题。
+
+    original_question 为原题；reasoning_path 是已验证步骤的时间排序证据；
+    all_info 是所有检索候选；trajectory 记录每步种子、工具、答案和局部检查；
+    experiment_setting 控制经验写入位置；ctx 保存题型和已求变量。
+    返回 sufficient、reason、final_answer 等字段；只有判为充分才写成功经验。
     """
     try:
         subquestions_details = []
@@ -4372,7 +4411,7 @@ def test_final_answer_sufficiency(original_question: str,
                 "raw_response": response
             }
             
-            # if Final sufficientity test pass, record questions enhancement data
+            # 只在最终证据被判为充分时写入可复用经验；失败答案不进入成功样例。
             if sufficiency_result["sufficient"]:
                 try:
                     from .enhanced_unified_integration import (
@@ -4453,6 +4492,7 @@ def test_final_answer_sufficiency(original_question: str,
                         }
                         print(f"decomposition_result: {decomposition_result}")
                         
+                        # 整题分解经验：题型、子问题、关系指标、约束及时间变量。
                         record_question_decomposition_enhancement(
                             question=original_question,
                             question_type=question_type,
@@ -4502,7 +4542,7 @@ def test_final_answer_sufficiency(original_question: str,
                                 #             if isinstance(candidate, dict) and candidate.get('entity'):
                                 #                 selected_seeds.append(candidate['entity'])
                                 
-                                # recordSeed Selectionenhance
+                                # 保存当前轨迹中实际使用的种子，供相似子问题构造选种子提示。
                                 if available_seeds and subq_text:
                                     print(f"\n📋 recordSeed Selectionenhance (Trajectory {i+1}):")
                                     print(f"Subquestion: {subq_text}")
@@ -4611,7 +4651,7 @@ def test_final_answer_sufficiency(original_question: str,
                                         print("✅ Toolkit Selectionenhancement datarecord")
                                         # exit()
                                         
-                                        # recordExperience pooldata
+                                        # 将通过验证的子问题证据及工具参数写入统一知识存储。
                                         try:
                                             print(f"\n📋 recordExperience pooldata (Trajectory {i+1}):")
                                             print(f"Subquestion: {subq_text}")

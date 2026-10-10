@@ -19,12 +19,16 @@ class ToolkitConfig:
     parameters: Dict[str, Any]
     description: str
 
+# 规则版工具选择器，依据 First/Last/Before/After/Equal 等约束决定查询类型；它与 IntelligentToolkitSelector 的 LLM 规划路径不同。
+# 规则版工具选择器，依据 First/Last/Before/After/Equal 等约束决定查询类型；它与 IntelligentToolkitSelector 的 LLM 规划路径不同。
 class ToolkitSelector:
     """Toolkit selector"""
     
     def __init__(self, toolkit: TemporalKGToolkit):
         self.toolkit = toolkit
     
+# 从子问题指标和 ctx 提取时间变量，再选择相应的时间查询方法和参数。
+# 从子问题指标和 ctx 提取时间变量，再选择相应的时间查询方法和参数。
     def select_toolkit_for_subquestion(self, subq: SubQuestion, ctx: Dict[str, Any]) -> ToolkitConfig:
         """
         Select the appropriate toolkit based on the subquestion type and time requirements

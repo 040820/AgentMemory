@@ -33,6 +33,8 @@ except ImportError:
     def create_toolkit(db_path):
         return StubToolkit()
 
+# KG 是推理层访问知识图谱的静态门面：管理当前数据集 DB 路径、实体 ID/名称转换、路径检索和工具分发。
+# KG 是推理层访问知识图谱的静态门面：管理当前数据集 DB 路径、实体 ID/名称转换、路径检索和工具分发。
 class KG:
     # database path configuration (dynamic from TPKGConfig)
     _toolkit = None
@@ -109,6 +111,8 @@ class KG:
         return {"anchor_entity": None, "linked_entities": []}
 
     @staticmethod
+# 围绕 seed 取得图路径并统一成下游格式；后续会按 indicator 做语义/时间筛选，避免把所有邻边都交给 LLM。
+# 围绕 seed 取得图路径并统一成下游格式；后续会按 indicator 做语义/时间筛选，避免把所有邻边都交给 LLM。
     def retrieve_paths_for_entity(entity_name: str, seeds: List[int] = None, 
                                  time_constraints: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         """
@@ -565,6 +569,8 @@ class KG:
         return sorted_paths
 
     @staticmethod
+# 按方法名动态调用 TemporalKGToolkit；这里是工具规划结果进入实际 SQL/时间查询的适配层。
+# 按方法名动态调用 TemporalKGToolkit；这里是工具规划结果进入实际 SQL/时间查询的适配层。
     def query_with_toolkit(query_type: str, **kwargs) -> Dict[str, Any]:
         """
         use toolkit to query

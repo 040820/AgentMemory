@@ -34,6 +34,7 @@ class TemplateCard:
             raise RuntimeError("pyyaml not installed")
         return yaml.safe_dump(self.spec, sort_keys=False, allow_unicode=True)
 
+# 保存和读取 YAML 工作流模板及示例问题；属于模板工作流路径，不等同于 stepwise 的时序分解/检索主循环。
 class TemplateRegistry:
     def __init__(self, dir_path: Path = TEMPLATES_DIR, index_path: Path = INDEX_PATH):
         self.dir = dir_path

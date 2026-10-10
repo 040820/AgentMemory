@@ -30,6 +30,8 @@ except Exception:
     SBERT_AVAILABLE = False
 
 @dataclass
+# 一条经验记录的数据模型：保存查询文本/类型、实体和时间约束、证据、来源、相似度及成功统计等元数据。
+# 一条经验记录的数据模型：保存查询文本/类型、实体和时间约束、证据、来源、相似度及成功统计等元数据。
 class KnowledgeEntry:
     """Unified knowledge entry"""
     # Basic information
@@ -95,12 +97,13 @@ class LRUCache:
             del self.cache[key]
             self.access_order.remove(key)
 
+# 统一经验库实现：将经验持久化到 SQLite，并用向量相似度、实体/时间条件和命中统计检索候选记录。
+# 统一经验库实现：将经验持久化到 SQLite，并用向量相似度、实体/时间条件和命中统计检索候选记录。
 class UnifiedKnowledgeStore:
-    """
-        Unified knowledge store system
-    
-    Merge experience pool and template learning data, provide a unified query interface
-    Support LRU cache and buffer management
+    """把成功推理经验和提示样例写入同一 SQLite 表，并提供相似问题查询。
+
+    数据库存放结构化 JSON 字段；向量索引用于候选召回，LRU 用于进程内缓存。
+    存储路径可按实验设置隔离，不能假定所有实验共享同一个数据库。
     """
     
     def __init__(self, db_path: str = None, experiment_setting: Optional[ExperimentSetting] = None,
@@ -147,7 +150,7 @@ class UnifiedKnowledgeStore:
         self._use_vector_index = True  # Default enable vector index
     
     def _init_db(self):
-        """Initialize database table structure"""
+        """创建统一知识表和检索索引，并为旧库补齐缺失列。"""
         db_dir = os.path.dirname(self.db_path)
         if db_dir and not os.path.exists(db_dir):
             os.makedirs(db_dir, exist_ok=True)
@@ -155,7 +158,8 @@ class UnifiedKnowledgeStore:
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
         
-        # Create unified knowledge table
+        # key_hash 是去重主键；query_text/query_type 用于查相似问题及区分记录用途。
+        # entities、时间约束、指标、证据和工具参数分别序列化为 JSON 文本列。
         cur.execute("""
         CREATE TABLE IF NOT EXISTS unified_knowledge (
           key_hash TEXT PRIMARY KEY,
@@ -163,23 +167,23 @@ class UnifiedKnowledgeStore:
           query_type TEXT NOT NULL,  -- 'main_question' or 'subquestion'
           norm_text TEXT NOT NULL,
           
-          -- Experience pool data
+          -- 子问题经验：实体、时间、指标边、已验证证据、实际使用的工具参数。
           entities_json TEXT,
           time_constraint_json TEXT,
           indicators_json TEXT,
           evidence_json TEXT,
           toolkit_params_json TEXT,
           
-          -- Template learning data
+          -- 提示样例：题型、模板、分解结果和执行轨迹。
           question_type TEXT,
           template_data_json TEXT,
           decomposition_data_json TEXT,
           execution_data_json TEXT,
           
-          -- Sufficiency test parameters
+          -- 记录充分性检查时的参数，便于回溯为什么一条经验可用。
           sufficiency_args_json TEXT,
           
-          -- Metadata
+          -- 命中次数、成功率与更新时间用于检索排序和管理。
           success_rate REAL DEFAULT 0.0,
           hit_count INTEGER DEFAULT 0,
           last_hit_at TEXT,
@@ -189,7 +193,7 @@ class UnifiedKnowledgeStore:
           updated_at TEXT NOT NULL
         )""")
         
-        # Check and add missing columns (for existing database compatibility)
+        # 兼容已经存在的数据库：只增补旧表没有的列，不清空历史记录。
         cur.execute("PRAGMA table_info(unified_knowledge)")
         existing_columns = [row[1] for row in cur.fetchall()]
         
@@ -497,13 +501,14 @@ class UnifiedKnowledgeStore:
                        execution_data: Dict[str, Any] = None,
                        sufficiency_args: Dict[str, Any] = None,
                        success_rate: float = 0.0) -> str:
+        """写入或更新一条成功经验，并同步向量索引和内存缓存。
+
+        query_text/query_type 标识要匹配的问题及经验类别；entities、time_constraint、
+        indicators、evidence、toolkit_params 保存子问题的图谱证据；
+        question_type、template_data、decomposition_data、execution_data 保存可注入提示的样例；
+        sufficiency_args 与 success_rate 记录验证信息。返回去重键 key_hash。
         """
-        Store knowledge entry
-        
-        Returns:
-            Generated key hash
-        """
-        # Generate key and normalize text
+        # 去重键同时考虑问题文本、类别、实体和时间条件；规范化文本供检索使用。
         key_hash = self._generate_key_hash(query_text, query_type, entities, time_constraint)
         norm_text = self._normalize_text(query_text, entities, time_constraint)
         
@@ -519,7 +524,7 @@ class UnifiedKnowledgeStore:
         exists = cur.fetchone() is not None
         
         if exists:
-            # Update existing entry
+            # 同一键重复写入时覆盖内容和更新时间，不新增一条重复经验。
             cur.execute("""
             UPDATE unified_knowledge SET
               query_text = ?, norm_text = ?,
@@ -538,7 +543,7 @@ class UnifiedKnowledgeStore:
                 json.dumps(sufficiency_args or {}), success_rate, now, key_hash
             ))
         else:
-            # Insert new entry
+            # 新经验先存 SQLite，再加入向量索引和进程内 LRU 缓存。
             cur.execute("""
             INSERT INTO unified_knowledge (
               key_hash, query_text, query_type, norm_text,
@@ -561,7 +566,7 @@ class UnifiedKnowledgeStore:
         conn.commit()
         conn.close()
         
-        # Update vector index (only for new records)
+        # 只给新记录增量建立向量索引；索引更新失败不会撤销已提交的 SQLite 写入。
         if not exists and self._use_vector_index:
             try:
                 vector_index = self._get_vector_index()
@@ -604,22 +609,14 @@ class UnifiedKnowledgeStore:
                         include_template_data: bool = True,
                         include_experience_data: bool = True,
                         search_all_individual: bool = False) -> List[Dict[str, Any]]:
-        """
-        Query knowledge entry
-        
-        Args:
-            query_text: Query text
-            query_type: Query type filter ('main_question', 'subquestion', None means all)
-            entities: Entity list
-            time_constraint: Time constraint
-            k: Return result number
-            sim_threshold: Similarity threshold
-            include_template_data: Whether to include template learning data
-            include_experience_data: Whether to include experience pool data
-            search_all_individual: Whether to search all individual databases (only valid in shared mode)
-        
-        Returns:
-            Matched knowledge entry list
+        """按相似度读取经验，返回最多 k 条记录及其 JSON 字段。
+
+        query_text 是当前问题；query_type 可限制分解、选种子、选工具或子问题经验；
+        entities 会触发 SQL 实体过滤；time_constraint 用于 SQL 路径的规范化文本匹配，
+        向量索引分支并未按时间条件过滤；sim_threshold 是最低相似度；
+        include_template_data、include_experience_data 控制返回字段；
+        search_all_individual 在共享模式下允许查各实验数据库。
+        命中只提供参考样例，调用方仍需判断当前证据是否充分。
         """
         # If in shared mode and require to search all individual databases
         if search_all_individual and self.storage_manager.storage_mode == StorageMode.SHARED:
@@ -628,10 +625,10 @@ class UnifiedKnowledgeStore:
                 k, sim_threshold, include_template_data, include_experience_data
             )
         
-        # Try to use vector index for fast retrieval
+        # 无实体过滤时优先用向量索引召回，再从 SQLite 取完整记录并过滤失败经验。
         vector_index = self._get_vector_index()
         
-        if vector_index and not entities:  # Vector index does not support entity filtering, if there are entities, use traditional method
+        if vector_index and not entities:  # 向量索引不支持实体条件，带实体时走下方 SQL 分支。
             # Use vector index to retrieve top-K candidates
             top_candidates = vector_index.search(
                 query_text=query_text,
@@ -732,7 +729,7 @@ class UnifiedKnowledgeStore:
             
             return results
         
-        # Fallback: use traditional SQL query method (when vector index is not available or there is entity filtering)
+        # 无向量索引或要求实体过滤时，先用 SQL 缩小范围，再对文本嵌入计算相似度。
         norm_text = self._normalize_text(query_text, entities, time_constraint)
         query_embedding = self._embed_text(query_text)
         
@@ -752,7 +749,7 @@ class UnifiedKnowledgeStore:
             where_conditions.append("query_type = ?")
             params.append(query_type)
         
-        # Entity filtering - change to more宽松的匹配
+        # 实体过滤使用 JSON 文本 LIKE，仅是宽松的字符串包含匹配。
         if entities:
             # Create a LIKE condition for each entity, using OR to connect
             entity_conditions = []

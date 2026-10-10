@@ -49,6 +49,8 @@ class ToolkitExample:
     time_requirements: List[str]
 
 
+# 智能工具选择器：把子问题、种子实体和时间上下文交给 LLM，要求它选择一个或多个可执行工具。
+# 智能工具选择器：把子问题、种子实体和时间上下文交给 LLM，要求它选择一个或多个可执行工具。
 class IntelligentToolkitSelector:
     """
     simplified toolkit selector:
@@ -221,19 +223,24 @@ class IntelligentToolkitSelector:
     # ============================
     # public entry
     # ============================
+# 公共入口：先整理种子实体名和时间提示，再走 LLM 工具规划；出错或无效时返回默认的一跳查询工具。
+# 公共入口：先整理种子实体名和时间提示，再走 LLM 工具规划；出错或无效时返回默认的一跳查询工具。
     def select_toolkits(self,
                         subquestion: str,
                         seeds: List[int],
                         context: Dict[str, Any],
                         question_type: Optional[str] = None) -> List[Dict[str, Any]]:
-        """
-        compatible with old version: output dictionary contains toolkit_name (=underlying method name), parameters, reasoning, priority, original_name
+        """为当前子问题选时间 KG 工具，返回按优先级排列的工具配置列表。
+
+        seeds 是图谱实体 ID，context 含前序答案/时间，question_type 决定提示模板；
+        每项含底层 toolkit_name、parameters、reasoning 等字段，供 stepwise 执行。
+        LLM 不可用或返回无效计划时退回默认一跳查询。
         """
         try:
             # 1) seed entity names
             entity_names = self._seed_ids_to_names(seeds)
 
-            # 2) question type classification (only used for prompt routing, not used for rules)
+            # 当前题型由上游传入，仅用于选提示模板；这里不再按规则硬编码算子。
             qtype = question_type
 
             # 3) extract time hints from question
@@ -320,15 +327,17 @@ class IntelligentToolkitSelector:
     # ============================
     # LLM selector (main method)
     # ============================
+# 构建专用提示词并请求模型返回工具计划；随后解析响应、校验工具名并转换成代码可调用的方法。
+# 构建专用提示词并请求模型返回工具计划；随后解析响应、校验工具名并转换成代码可调用的方法。
     def _llm_selection(self, subquestion: str, seeds: List[int], context: Dict[str, Any], 
                        qtype: str, time_hints: Dict[str, Any], entity_names: List[str]) -> List[Dict[str, Any]]:
-        """completely use LLM for toolkit selection, select specialized prompt based on question type"""
+        """汇总种子、上下文和时间提示，请 LLM 选工具，再映射为底层方法。"""
         
         # build basic information
         seed_info = self._build_seed_info(seeds)
         context_info = self._build_context_info(context)
         
-        # select specialized prompt based on question type
+        # 专用提示同时可从统一知识库读取同题型的成功工具选择示例。
         prompt = self._build_specialized_prompt(
             subquestion=subquestion,
             seed_info=seed_info,
@@ -348,6 +357,7 @@ class IntelligentToolkitSelector:
             print(prompt)
             print(f"LLM toolkit selection response: {resp}")
             # exit()
+            # 先解析模型给出的友好工具名，再映射成 TemporalKGToolkit 可调用的方法。
             selected = self._parse_llm_response(resp)
             result = self._map_to_methods(selected)
             
@@ -363,6 +373,7 @@ class IntelligentToolkitSelector:
     # ============================
     # mapping and default
     # ============================
+# 把提示中的友好工具名/参数映射为底层方法名/参数；无有效映射时回退一跳查询。
     def _map_to_methods(self, plans: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """map original_name + friendly parameters in plans to underlying method + final parameters"""
         out = []
@@ -464,9 +475,9 @@ class IntelligentToolkitSelector:
             return "No specific indicator information detected"
 
     def _build_specialized_prompt(self, subquestion: str, seed_info: str, 
-                                 context_info: str, qtype: str, 
-                                 time_hints: Dict[str, Any], entity_names: List[str]) -> str:
-        """build specialized prompt based on question type"""
+                                  context_info: str, qtype: str,
+                                  time_hints: Dict[str, Any], entity_names: List[str]) -> str:
+        """调用题型专用提示模板；模板模块会尝试加入历史工具选择经验。"""
         # import specialized prompt function
         try:
             from .toolkit_prompts_v2 import get_prompt_for_question_type as get_prompt_v2

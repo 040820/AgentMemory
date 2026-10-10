@@ -18,6 +18,7 @@ RULES = [
     (re.compile(r"\b(during|between)\b", re.I), "during_between"),
 ]
 
+# 模板式 Agent：匹配或生成 workflow，再委托 KG.run_workflow 执行。main.py 会构造该对象，但当前主要求解逻辑由 solve_with_decomposition 驱动。
 class Agent:
     def __init__(self, registry: TemplateRegistry):
         self.registry = registry

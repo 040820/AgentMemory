@@ -1,6 +1,21 @@
+# =============================
+# file: Data/entity_try.py
+# =============================
+# 职责：候选实体生成的关键词层（prepare_datasets Step3 使用）：
+#   combined_keywords = MiMo LLM 抽取关键词 + 同义词启发式；
+#   另提供字面命中(literal_hit_entities)与子图扩展(extract_3hop_subgraph)
+#   供 -n 子集索引选取相关实体。语义召回本体在 new.py。
 import os, re, json, argparse, sqlite3
 from typing import List, Tuple, Dict, Any, Iterable, Set, Optional
+from pathlib import Path
 import numpy as np
+
+# 加载项目根目录 .env（MIMO_API_KEY 等配置）
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+except Exception:
+    pass
 
 # ============== optional: FAISS ==============
 try:
@@ -8,24 +23,39 @@ try:
 except Exception:
     faiss = None
 
-# ============== OpenAI client ==============
+# ============== local embedding (BGE-M3, replaces OpenAI embeddings API) ==============
+from memotime.kg_agent.local_embed import embed_texts
+
+# ============== chat client（关键词抽取/重排）：优先自部署 vLLM Qwen3-8B，否则回退 MiMo ==============
 try:
     from openai import OpenAI
     _openai_client = None
     def _client():
         global _openai_client
         if _openai_client is None:
-            from memotime.kg_agent.llm import DEFAULT_OPENAI_API_KEY
-            api_key = os.getenv("OPENAI_API_KEY") or DEFAULT_OPENAI_API_KEY
-            _openai_client = OpenAI(api_key=api_key)
+            if os.getenv("QWEN_BASE_URL"):
+                # vLLM 无认证时占位 key 即可；地址从 .env 的 QWEN_BASE_URL 读取
+                _openai_client = OpenAI(api_key=os.getenv("DASHSCOPE_API_KEY") or "XXX",
+                                        base_url=os.getenv("QWEN_BASE_URL"))
+            else:
+                api_key = os.getenv("MIMO_API_KEY")
+                if not api_key:
+                    raise RuntimeError("missing MIMO_API_KEY (check .env in project root)")
+                _openai_client = OpenAI(api_key=api_key, base_url=os.getenv("MIMO_BASE_URL"))
         return _openai_client
 except Exception:
     OpenAI = None
     def _client():
         raise RuntimeError("openai package not installed. pip install openai")
 
-EMBED_MODEL = "text-embedding-3-large"
-RERANK_MODEL = "gpt-4o-mini"
+# 抽词模型与当前实验骨干保持一致（复现口径：预处理与评测同骨干）
+USE_QWEN = bool(os.getenv("QWEN_BASE_URL"))
+RERANK_MODEL = os.getenv("LLM_MODEL", "qwen3-8b") if USE_QWEN else os.getenv("MIMO_MODEL", "mimo-v2.6-flash")
+
+
+def _extra_body():
+    """Qwen3 必须关思考，否则回复以  开头污染 JSON 解析；MiMo 不需要此参数"""
+    return {"chat_template_kwargs": {"enable_thinking": False}} if USE_QWEN else None
 
 # ============== SQLite basics ==============
 def _connect(db_path: str) -> sqlite3.Connection:
@@ -97,13 +127,13 @@ def extract_3hop_subgraph(db_path: str, seeds: Iterable[int], k: int = 3) -> Lis
     marks = ",".join("?" for _ in visited)
     params = tuple(visited)
     cur.execute(
-        f"SELECT head_id, relation, tail_id, time FROM edges "
+        f"SELECT head_id, relation, tail_id, t_start FROM edges "
         f"WHERE head_id IN ({marks}) OR tail_id IN ({marks})",
         params + params
     )
     rows = cur.fetchall()
     conn.close()
-    return rows  # [(h, r, t, time), ...]
+    return rows  # [(h, r, t, t_start), ...]
 
 # ============== text normalization and heuristic keywords ==============
 _STOPWORDS = {
@@ -187,6 +217,7 @@ def llm_keywords(question: str, max_kw: int = 8) -> List[str]:
                   {"role":"user","content":json.dumps(user, ensure_ascii=False)}],
         temperature=0,
         response_format={"type":"json_object"},
+        extra_body=_extra_body(),
     )
     try:
         data = json.loads(resp.choices[0].message.content)
@@ -200,6 +231,8 @@ def llm_keywords(question: str, max_kw: int = 8) -> List[str]:
         return out[:max_kw]
     except Exception:
         return []
+
+# ==================== combined keywords ==============
 
 def combined_keywords(question: str, llm_max: int = 8, heur_max_len: int = 8) -> List[str]:
     try:
@@ -273,18 +306,7 @@ def literal_hit_entities(db_path: str, question: str, sim_th: float = 0.85, span
             hits.append((eid, name))
     return hits
 
-# ============== OpenAI embedding and reranking ==============
-def openai_embed(texts: List[str]) -> np.ndarray:
-    cli = _client()
-    out = []
-    for i in range(0, len(texts), 256):
-        batch = texts[i:i+256]
-        resp = cli.embeddings.create(model=EMBED_MODEL, input=batch)
-        out.extend([v.embedding for v in resp.data])
-    arr = np.array(out, dtype=np.float32)
-    arr /= (np.linalg.norm(arr, axis=1, keepdims=True) + 1e-12)
-    return arr
-
+# ============== LLM reranking (MiMo chat) ==============
 def llm_rerank(query: str, candidates: List[str]) -> List[float]:
     if not candidates:
         return []
@@ -300,7 +322,8 @@ def llm_rerank(query: str, candidates: List[str]) -> List[float]:
         messages=[{"role":"system","content":sys},
                   {"role":"user","content":json.dumps(user, ensure_ascii=False)}],
         temperature=0,
-        response_format={"type":"json_object"}
+        response_format={"type":"json_object"},
+        extra_body=_extra_body(),
     )
     try:
         data = json.loads(resp.choices[0].message.content)
@@ -356,7 +379,7 @@ def cmd_build_index(db_path: str, out_dir: str, fp16: bool = False,
     ents = fetch_entities(db_path)
     ids = [i for i, _ in ents]
     names = [n for _, n in ents]
-    E = openai_embed(names)  # (N, 3072)
+    E = embed_texts(names)  # (N, 3072)
     if fp16:
         E = E.astype("float16")
     np.save(os.path.join(out_dir, "entity_embs.npy"), E)
@@ -411,7 +434,7 @@ def _load_meta(index_dir: str):
 #     kws = keywords if keywords else [question]
 
 #     # C) per keyword ANN
-#     q_embs = openai_embed(kws)
+#     q_embs = embed_texts(kws)
 #     I, _ = ann.search(q_embs, topk=ann_topk_per_kw)
 
 #     cand: Dict[int, Dict[str, Any]] = {}  # eid_pos -> info
@@ -472,7 +495,7 @@ def keyword_candidates_openai_with_keywords(
     kws = keywords if keywords else [question]
 
     # C) per keyword ANN
-    q_embs = openai_embed(kws)
+    q_embs = embed_texts(kws)
     I, _ = ann.search(q_embs, topk=ann_topk_per_kw)
 
     # use "database id" as cand key, avoid confusion

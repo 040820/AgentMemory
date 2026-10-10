@@ -76,6 +76,7 @@ class QuestionRecord:
     timestamp: str = ""
     version: str = "1.0"
 
+# 按题记录各阶段耗时、LLM 调用量和最终判定；main.py 在题目开始/结束处开启与关闭监控。
 class PerformanceMonitor:
     """performance monitor"""
     

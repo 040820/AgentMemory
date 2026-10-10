@@ -1,0 +1,6 @@
+﻿dataset,qid,qtype,question,gold_entities,gold_times,prediction,pred_candidates,strict_hit,strict_exact,local_verifier_hit
+TimeQuestions,12945,['Temp.Ans'],what time is justin biebers birthday,,1994-03-01T00:00:00Z,"So the answer is: 1994, or 1994, or [date of birth] on 1994",1994|1994|date of birth],1,0,1
+TimeQuestions,12946,['Explicit'],what was jorge luis borges awarded in 1971,Jerusalem Prize,,,,0,0,0
+TimeQuestions,12947,['Ordinal'],what was the first book charles dickens wrote,The Pickwick Papers,,,,0,0,1
+TimeQuestions,12948,['Explicit'],what is population of vysočina region that is point in time is 2016-1-1,,509475,,,0,0,0
+TimeQuestions,12949,['Temp.Ans'],what is the start time for freeman dyson award receipt for josiah willard gibbs lectureship,,1972-01-01T00:00:00Z,"So the answer is: 1910, or Harold Spencer Jones (1910), or [Harold Spencer Jones] on 1910",1910|Harold Spencer Jones (1910)|Harold Spencer Jones],0,0,0
