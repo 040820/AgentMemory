@@ -1,0 +1,162 @@
+# 边界测试原始输出（2026-10-11，服务器 h3c，qwen3-32b，边界脚本 boundary_decompose_test.py）
+# 过滤说明：已剔除 Hybrid Retrieval import 提示、XLMRoberta 分词警告、spaCy 缺失警告、每次 LLM 响应头打印；其余原样保留
+
+====================================================================================================
+[1/9] [对照·AFTER] Which city did Ali Reza visit after 2019?
+rule-based classification
+  detect_question_type -> before_after
+use before_after type decomposition prompt
+attempt 1/3
+LLM response: Subquestions: ["After 2019, which city did Ali Reza visit?"]
+Indicators: ["Ali Reza --[visit]--> ?x (t2)"]
+Constraints: ["t2 > 2019", "after(t2, 2019)"]
+Time_vars: ["t2", "2019"]...
+JSON parsing failed, try pure text parsing
+successfully parsed text format
+decomposition quality analysis: {'has_temporal_info': True, 'has_dependencies': False, 'has_constraints': True, 'subquestion_count': 1, 'expected_subquestion_count': 1, ...}
+  -> 1 subquestion(s) | time_vars=['t2', '2019']
+     S1: After 2019, which city did Ali Reza visit?
+         indicator: Indicator(edges=[IndicatorEdge(subj='Ali Reza', rel='visit', obj='?x', time_var='t2')], constraints=['t2 > 2019', 'after(t2, 2019)'])
+
+====================================================================================================
+[2/9] [对照·区间] What major event happened between 2018 and 2020 in Egypt?
+rule-based classification
+LLM-based classification: between
+  detect_question_type -> between
+use between type decomposition prompt
+attempt 1/3
+LLM response: Subquestions: ['What major event happened in Egypt in t1?', 'What major event happened in Egypt in t2?']
+Indicators: ['between']
+Constraints: ['Egypt', 'Egypt']
+Time_vars: ['t1', 't2']...
+JSON parsing failed, try pure text parsing
+successfully parsed text format
+  -> 2 subquestion(s) | time_vars=['t1', 't2']
+     S1: What major event happened in Egypt in t1?
+         indicator: Indicator(edges=[], constraints=['Egypt', 'Egypt'])
+     S2: What major event happened in Egypt in t2?
+         indicator: Indicator(edges=[], constraints=['Egypt', 'Egypt'])
+>>> 【异常】2018/2020 未进入约束；约束退化为无关字符串；indicator 空边
+
+====================================================================================================
+[3/9] [对照·序数] Who was the first person to win the Nobel Prize in Physics?
+rule-based classification
+  detect_question_type -> first_last
+use first_last type decomposition prompt
+attempt 1/3
+LLM response: Subquestions: ["Who was the first person to win the Nobel Prize in Physics?"]
+Indicators: ["?x --[win]--> Nobel Prize in Physics (t1)"]
+Constraints: ["first(t1)"]
+Time_vars: ["t1"]...
+successfully parsed text format
+  -> 1 subquestion(s) | time_vars=['t1']
+     S1: Who was the first person to win the Nobel Prize in Physics?
+         indicator: Indicator(edges=[IndicatorEdge(subj='?x', rel='win', obj='Nobel Prize in Physics', time_var='t1')], constraints=['first(t1)'])
+
+====================================================================================================
+[4/9] [实验·循环] What classes do I have on the next three Mondays?
+rule-based classification
+LLM-based classification: between
+  detect_question_type -> between
+📋 no similar decomposition examples found, use template learning
+use between type decomposition prompt
+attempt 1/3
+LLM response: Subquestions: [
+  "What is the current date?",
+  "What are the dates of the next three Mondays?",
+  "What classes are scheduled on Monday, t1?",
+  "What classes are scheduled on Monday, t2?",
+  "What ...
+JSON parsing failed, try pure text parsing
+successfully parsed text format
+decomposition quality analysis: {'has_temporal_info': True, ... 'subquestion_count': 1, ...}
+  -> 1 subquestion(s) | time_vars=['t1', 't2', 't3']
+     S1: [
+         indicator: Indicator(edges=[], constraints=['['])
+>>> 【异常】题型误判为 between；LLM 输出偏模板导致解析产物为垃圾 "S1: ["，仍标记 successfully parsed；质量分析未拦截
+
+====================================================================================================
+[5/9] [实验·循环] When is the next Christmas after 2024?
+rule-based classification
+  detect_question_type -> before_after
+use before_after type decomposition prompt
+attempt 1/3
+LLM response: Subquestions: ["After 2024, when is Christmas?"]
+Indicators: ["?x --[Christmas]--> ?y (t2)"]
+Constraints: ["t2 > 2024", "after(t2, 2024)"]
+Time_vars: ["t2", "2024"]...
+successfully parsed text format
+  -> 1 subquestion(s) | time_vars=['t2', '2024']
+     S1: After 2024, when is Christmas?
+         indicator: Indicator(edges=[IndicatorEdge(subj='?x', rel='Christmas', obj='?y', time_var='t2')], constraints=['t2 > 2024', 'after(t2, 2024)'])
+>>> 【异常】Christmas 被虚构为图中的可查关系边；无周期/模运算语义；"next" 被简单降级为 after
+
+====================================================================================================
+[6/9] [实验·并列] Both Road A and Road B opened on 2019-05-01. Which one opened first?
+rule-based classification
+  detect_question_type -> first_last
+use first_last type decomposition prompt
+attempt 1/3
+LLM response: Subquestions: ["When did Road A open?", "When did Road B open?"]
+Indicators: ["Road A --[open]--> ?t1", "Road B --[open]--> ?t2"]
+Constraints: ["first(?t1)", "first(?t2)"]
+Time_vars: ["?t1", "?t...
+successfully parsed text format
+  -> 2 subquestion(s) | time_vars=['?t1', '?t2']
+     S1: When did Road A open?
+         indicator: Indicator(edges=[], constraints=['first(?t1)', 'first(?t2)'])
+     S2: When did Road B open?
+         indicator: Indicator(edges=[], constraints=['first(?t1)', 'first(?t2)'])
+>>> 【异常】约束 first(?t1) 且 first(?t2) 逻辑矛盾；indicator 空边；无并列检测出口（同日应答并列而非强行排序）
+
+====================================================================================================
+[7/9] [实验·不可判] He received Award X and Award Y in the same year 1995. Which one did he receive first?
+rule-based classification
+  detect_question_type -> first_last
+use first_last type decomposition prompt
+attempt 1/3
+LLM response: Subquestions: ["When did he receive Award X?", "When did he receive Award Y?"]
+Indicators: ["he --[receive]--> Award X (t1)", "he --[receive]--> Award Y (t2)"]
+Constraints: ["t1 < t2"]
+Time_vars: ["t1...
+successfully parsed text format
+  -> 2 subquestion(s) | time_vars=['t1', 't2']
+     S1: When did he receive Award X?
+         indicator: Indicator(edges=[IndicatorEdge(subj='he', rel='receive', obj='Award X', time_var='t1')], constraints=['t1 < t2'])
+     S2: When did he receive Award Y?
+         indicator: Indicator(edges=[IndicatorEdge(subj='he', rel='receive', obj='Award Y', time_var='t2')], constraints=[])
+>>> 【异常】t1 < t2 预设可比——同年 1995 时该约束永假；充分性检查将死循环或乱选
+
+====================================================================================================
+[8/9] [实验·双时间轴] A symptom was recorded on 2024-04-10 but actually occurred on 2024-03-05. Which happened first?
+rule-based classification
+  detect_question_type -> first_last
+use first_last type decomposition prompt
+attempt 1/3
+LLM response: Subquestions: ["Which happened first: the symptom being recorded or the symptom actually occurring?"]
+Indicators: ["Symptom --[recorded]--> ?x (t1)", "Symptom --[occur]--> ?x (t2)"]
+Constraints: ["fir...
+successfully parsed text format
+  -> 1 subquestion(s) | time_vars=['t1', 't2']
+     S1: Which happened first: the symptom being recorded or the symptom actually occurring?
+         indicator: Indicator(edges=[IndicatorEdge(subj='Symptom', rel='recorded', obj='?x', time_var='t1')], constraints=['first(t1)', 'first(t2)'])
+>>> 【异常】first(t1) 与 first(t2) 互斥并存；数据模型仅单时间戳，发生时间/记录时间两条轴无法落图
+
+====================================================================================================
+[9/9] [实验·值震荡] The stock hit its all-time high in 2021. What was the lowest price after that?
+rule-based classification
+  detect_question_type -> before_after
+use before_after type decomposition prompt
+attempt 1/3
+LLM response: Subquestions: ["When did the stock hit its all-time high?", "After 2021, what was the lowest price of the stock?"]
+Indicators: ["stock --[hit]--> all-time high (t1)", "stock --[have]--> lowest price...
+successfully parsed text format
+  -> 2 subquestion(s) | time_vars=['t1', 't2']
+     S1: When did the stock hit its all-time high?
+         indicator: Indicator(edges=[IndicatorEdge(subj='stock', rel='hit', obj='all-time high', time_var='t1')], constraints=['t2 > t1', 'after(t2, t1)'])
+     S2: After 2021, what was the lowest price of the stock?
+         indicator: Indicator(edges=[IndicatorEdge(subj='stock', rel='have', obj='lowest price', time_var='t2')], constraints=['t2 > t1', 'after(t2, t1)'])
+>>> 【异常】区间聚合运算（高点后取最低）被降级为静态事实边查询；工具箱无 interval-min 算子
+
+====================================================================================================
+BOUNDARY TEST DONE
